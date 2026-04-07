@@ -1,0 +1,440 @@
+package com.vendormanagementmobile
+
+import android.content.ActivityNotFoundException
+import android.content.ContentValues
+import android.content.Intent
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.graphics.pdf.PdfDocument
+import android.media.MediaScannerConnection
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import androidx.core.content.FileProvider
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableArray
+import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.bridge.UiThreadUtil
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.text.NumberFormat
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+
+class OrderPdfModule(reactContext: ReactApplicationContext) :
+    ReactContextBaseJavaModule(reactContext) {
+
+  override fun getName(): String = "OrderPdfModule"
+
+  @ReactMethod
+  fun generateOrderBill(payload: ReadableMap, promise: Promise) {
+    Thread {
+      try {
+        val billPayload = payload.toBillPayload()
+        val pdfBytes = buildPdfBytes(billPayload)
+        val fileName = "bill_${sanitizeFileName(billPayload.orderNumber)}.pdf"
+        val fileUri = savePdf(fileName, pdfBytes)
+        val opened = openPdf(fileUri)
+
+        val result = Arguments.createMap().apply {
+          putString("fileName", fileName)
+          putString("fileUri", fileUri.toString())
+          putBoolean("opened", opened)
+        }
+
+        promise.resolve(result)
+      } catch (error: Exception) {
+        promise.reject("PDF_GENERATION_ERROR", error.message, error)
+      }
+    }.start()
+  }
+
+  private fun buildPdfBytes(payload: BillPayload): ByteArray {
+    val document = PdfDocument()
+    val bodyPaint =
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#1C2E52")
+          textSize = 12f
+        }
+    val bodyPaintBold =
+        Paint(bodyPaint).apply {
+          typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+    val headingPaint =
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#4B39F4")
+          textSize = 11f
+          typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+    val subtlePaint =
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#7487AD")
+          textSize = 11f
+        }
+    val titlePaint =
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#12214A")
+          textSize = 22f
+          typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+    val linePaint =
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+          color = Color.parseColor("#D9E2F2")
+          strokeWidth = 1f
+        }
+
+    val currencyFormatter = NumberFormat.getCurrencyInstance(Locale.US)
+    val pageWidth = 595
+    val pageHeight = 842
+    val margin = 40f
+    val contentWidth = pageWidth - margin * 2
+    val rowHeight = 22f
+    val itemColumnX = margin
+    val qtyColumnX = margin + 295f
+    val priceColumnX = margin + 365f
+    val totalColumnX = margin + 455f
+
+    var pageNumber = 1
+    lateinit var page: PdfDocument.Page
+    lateinit var canvas: Canvas
+    var y = margin
+
+    fun startPage(titleSuffix: String? = null) {
+      val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()
+      page = document.startPage(pageInfo)
+      canvas = page.canvas
+      canvas.drawColor(Color.WHITE)
+      y = margin
+
+      canvas.drawText(
+          "Vendor Management Bill${titleSuffix?.let { " $it" } ?: ""}",
+          margin,
+          y,
+          titlePaint)
+      y += 26f
+      canvas.drawText(
+          "Order ${payload.orderNumber}  |  ${payload.createdAtLabel}",
+          margin,
+          y,
+          subtlePaint)
+      y += 18f
+      canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+      y += 18f
+    }
+
+    fun finishPage() {
+      document.finishPage(page)
+      pageNumber += 1
+    }
+
+    fun ensureSpace(height: Float, continuationTitle: String? = "(cont.)") {
+      if (y + height <= pageHeight - margin) {
+        return
+      }
+
+      finishPage()
+      startPage(continuationTitle)
+    }
+
+    fun wrapText(text: String, paint: Paint, maxWidth: Float): List<String> {
+      if (text.isBlank()) {
+        return listOf("")
+      }
+
+      val words = text.trim().split(Regex("\\s+"))
+      val lines = mutableListOf<String>()
+      var currentLine = ""
+
+      for (word in words) {
+        val candidate = if (currentLine.isBlank()) word else "$currentLine $word"
+
+        if (paint.measureText(candidate) <= maxWidth) {
+          currentLine = candidate
+        } else {
+          if (currentLine.isNotBlank()) {
+            lines.add(currentLine)
+          }
+          currentLine = word
+        }
+      }
+
+      if (currentLine.isNotBlank()) {
+        lines.add(currentLine)
+      }
+
+      return lines.ifEmpty { listOf("") }
+    }
+
+    fun drawBlockLabel(label: String) {
+      ensureSpace(18f, "(cont.)")
+      canvas.drawText(label, margin, y, headingPaint)
+      y += 18f
+    }
+
+    fun drawWrappedBlock(label: String, value: String) {
+      drawBlockLabel(label)
+      val lines = wrapText(value, bodyPaint, contentWidth)
+
+      for (line in lines) {
+        ensureSpace(18f, "(cont.)")
+        canvas.drawText(line, margin, y, bodyPaint)
+        y += 16f
+      }
+
+      y += 8f
+    }
+
+    startPage()
+
+    drawBlockLabel("CUSTOMER")
+    canvas.drawText(payload.customerName, margin, y, bodyPaintBold)
+    y += 18f
+    canvas.drawText("Account: ${payload.customerAccountId}", margin, y, subtlePaint)
+    y += 16f
+    canvas.drawText("Phone: ${payload.customerPhone}", margin, y, subtlePaint)
+    y += 18f
+    val addressLines = wrapText(payload.customerAddress, bodyPaint, contentWidth)
+    for (line in addressLines) {
+      ensureSpace(16f, "(cont.)")
+      canvas.drawText(line, margin, y, bodyPaint)
+      y += 16f
+    }
+    y += 10f
+
+    drawWrappedBlock("SALESPERSON", payload.salespersonName)
+    drawWrappedBlock("NOTES", payload.notes)
+
+    ensureSpace(64f, "(cont.)")
+    canvas.drawText("ITEM", itemColumnX, y, headingPaint)
+    canvas.drawText("QTY", qtyColumnX, y, headingPaint)
+    canvas.drawText("PRICE", priceColumnX, y, headingPaint)
+    canvas.drawText("TOTAL", totalColumnX, y, headingPaint)
+    y += 10f
+    canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+    y += 18f
+
+    payload.items.forEach { item ->
+      val itemLines = wrapText(item.name, bodyPaintBold, qtyColumnX - itemColumnX - 12f)
+      val requiredHeight = itemLines.size * 16f + 12f
+      ensureSpace(requiredHeight + 16f, "(cont.)")
+
+      itemLines.forEachIndexed { index, line ->
+        canvas.drawText(
+            line,
+            itemColumnX,
+            y,
+            if (index == 0) bodyPaintBold else bodyPaint,
+        )
+
+        if (index == 0) {
+          canvas.drawText(item.quantity.toString(), qtyColumnX, y, bodyPaint)
+          canvas.drawText(currencyFormatter.format(item.unitPrice), priceColumnX, y, bodyPaint)
+          canvas.drawText(currencyFormatter.format(item.lineTotal), totalColumnX, y, bodyPaintBold)
+        }
+
+        y += 16f
+      }
+
+      if (item.itemNumber.isNotBlank()) {
+        canvas.drawText("SKU: ${item.itemNumber}", itemColumnX, y, subtlePaint)
+        y += 14f
+      }
+
+      canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+      y += 14f
+    }
+
+    ensureSpace(110f, "(cont.)")
+    y += 8f
+    canvas.drawText("CREDITS", margin, y, headingPaint)
+    canvas.drawText(currencyFormatter.format(payload.totalCredits), totalColumnX, y, bodyPaint)
+    y += rowHeight
+    canvas.drawText("DEPOSITS", margin, y, headingPaint)
+    canvas.drawText(currencyFormatter.format(payload.totalDeposit), totalColumnX, y, bodyPaint)
+    y += rowHeight
+    canvas.drawLine(margin, y, pageWidth - margin, y, linePaint)
+    y += 18f
+    canvas.drawText("TOTAL PAYABLE", margin, y, titlePaint)
+    canvas.drawText(
+        currencyFormatter.format(payload.totalAmount),
+        totalColumnX - 10f,
+        y,
+        titlePaint)
+
+    finishPage()
+
+    return ByteArrayOutputStream().use { outputStream ->
+      document.writeTo(outputStream)
+      document.close()
+      outputStream.toByteArray()
+    }
+  }
+
+  private fun openPdf(uri: Uri): Boolean {
+    return try {
+      UiThreadUtil.runOnUiThread {
+        val openIntent =
+            Intent(Intent.ACTION_VIEW).apply {
+              setDataAndType(uri, "application/pdf")
+              addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+              addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        val chooser = Intent.createChooser(openIntent, "Open generated bill").apply {
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        reactApplicationContext.startActivity(chooser)
+      }
+      true
+    } catch (error: ActivityNotFoundException) {
+      false
+    } catch (error: Exception) {
+      false
+    }
+  }
+
+  private fun savePdf(fileName: String, pdfBytes: ByteArray): Uri {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      val resolver = reactApplicationContext.contentResolver
+      val values =
+          ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+            put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
+            put(
+                MediaStore.Downloads.RELATIVE_PATH,
+                "${Environment.DIRECTORY_DOWNLOADS}/VendorManagement",
+            )
+          }
+
+      val uri =
+          resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+              ?: throw IOException("Unable to reserve a location for the PDF file.")
+
+      resolver.openOutputStream(uri)?.use { outputStream ->
+        outputStream.write(pdfBytes)
+      } ?: throw IOException("Unable to write the generated PDF file.")
+
+      return uri
+    }
+
+    val downloadsDirectory =
+        File(reactApplicationContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "VendorManagement")
+    if (!downloadsDirectory.exists() && !downloadsDirectory.mkdirs()) {
+      throw IOException("Unable to create the local download directory.")
+    }
+
+    val file = File(downloadsDirectory, fileName)
+    FileOutputStream(file).use { outputStream ->
+      outputStream.write(pdfBytes)
+    }
+
+    MediaScannerConnection.scanFile(
+        reactApplicationContext,
+        arrayOf(file.absolutePath),
+        arrayOf("application/pdf"),
+        null)
+
+    return FileProvider.getUriForFile(
+        reactApplicationContext,
+        "${reactApplicationContext.packageName}.fileprovider",
+        file)
+  }
+
+  private fun formatCreatedAt(value: String): String {
+    if (value.isBlank()) {
+      return SimpleDateFormat("MMM dd, yyyy hh:mm a", Locale.US).format(Date())
+    }
+
+    val inputFormat =
+        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+          timeZone = TimeZone.getTimeZone("UTC")
+        }
+    val outputFormat = SimpleDateFormat("MMM dd, yyyy hh:mm a", Locale.US)
+
+    return try {
+      outputFormat.format(inputFormat.parse(value) ?: Date())
+    } catch (error: Exception) {
+      value
+    }
+  }
+
+  private fun sanitizeFileName(value: String): String =
+      value.replace(Regex("[^A-Za-z0-9_-]"), "_")
+
+  private fun ReadableArray.toBillItems(): List<BillItem> =
+      (0 until size()).mapNotNull { index ->
+        if (isNull(index)) {
+          return@mapNotNull null
+        }
+
+        val item = getMap(index)
+
+        BillItem(
+            itemNumber = item.getOptionalString("itemNumber"),
+            lineTotal = item.getOptionalDouble("lineTotal"),
+            name = item.getOptionalString("name"),
+            quantity = item.getOptionalInt("quantity"),
+            unitPrice = item.getOptionalDouble("unitPrice"),
+        )
+      }
+
+  private fun ReadableMap.toBillPayload(): BillPayload =
+      BillPayload(
+          createdAtLabel = formatCreatedAt(getOptionalString("createdAt")),
+          customerAccountId = getOptionalString("customerAccountId"),
+          customerAddress = getOptionalString("customerAddress"),
+          customerName = getOptionalString("customerName"),
+          customerPhone = getOptionalString("customerPhone"),
+          items = getArray("items")?.toBillItems() ?: emptyList(),
+          notes = getOptionalString("notes"),
+          orderNumber = getOptionalString("orderNumber"),
+          salespersonName = getOptionalString("salespersonName"),
+          totalAmount = getOptionalDouble("totalAmount"),
+          totalCredits = getOptionalDouble("totalCredits"),
+          totalDeposit = getOptionalDouble("totalDeposit"),
+      )
+
+  private fun ReadableMap.getOptionalDouble(key: String): Double =
+      if (hasKey(key) && !isNull(key)) getDouble(key) else 0.0
+
+  private fun ReadableMap.getOptionalInt(key: String): Int =
+      if (hasKey(key) && !isNull(key)) getInt(key) else 0
+
+  private fun ReadableMap.getOptionalString(key: String): String =
+      if (hasKey(key) && !isNull(key)) getString(key) ?: "" else ""
+
+  private data class BillItem(
+      val itemNumber: String,
+      val lineTotal: Double,
+      val name: String,
+      val quantity: Int,
+      val unitPrice: Double,
+  )
+
+  private data class BillPayload(
+      val createdAtLabel: String,
+      val customerAccountId: String,
+      val customerAddress: String,
+      val customerName: String,
+      val customerPhone: String,
+      val items: List<BillItem>,
+      val notes: String,
+      val orderNumber: String,
+      val salespersonName: String,
+      val totalAmount: Double,
+      val totalCredits: Double,
+      val totalDeposit: Double,
+  )
+}

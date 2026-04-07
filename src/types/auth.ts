@@ -2,9 +2,8 @@ export type ContentLoadState = 'loading' | 'ready' | 'empty' | 'error';
 export type SubmitState = 'idle' | 'loading' | 'success' | 'error';
 
 export interface LoginFormValues {
-  identifier: string;
+  email: string;
   password: string;
-  rememberMe: boolean;
 }
 
 export interface LoginScreenContent {
@@ -27,13 +26,21 @@ export interface LoginScreenContent {
 }
 
 export interface LoginRequest {
-  identifier: string;
+  email: string;
   password: string;
-  rememberMe: boolean;
+}
+
+export interface AuthUser {
+  id: number;
+  name: string;
+  phone: string;
+  email: string;
+  role: string;
 }
 
 export interface AuthSession {
   token: string;
+  user: AuthUser;
   refreshToken?: string;
   userName?: string;
 }

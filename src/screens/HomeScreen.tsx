@@ -1,0 +1,2052 @@
+import React, {useState} from 'react';
+import {
+  ActivityIndicator,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  useWindowDimensions,
+} from 'react-native';
+
+import {InlineMessage} from '../components/common/InlineMessage';
+import {ScreenContainer} from '../components/common/ScreenContainer';
+import {StatePanel} from '../components/common/StatePanel';
+import {orderService} from '../services/orderService';
+import {pdfService} from '../services/pdfService';
+import {palette} from '../theme/colors';
+import {
+  getContentWidth,
+  getDeviceType,
+  getHorizontalPadding,
+  moderateScale,
+} from '../theme/responsive';
+import {radii, shadowPresets} from '../theme/shape';
+import {spacing} from '../theme/spacing';
+import {AuthSession, ContentLoadState} from '../types/auth';
+import {Customer, PersonalInventoryItem} from '../types/order';
+
+type HomeView = 'home' | 'customers' | 'products';
+type LoadStatus = 'idle' | ContentLoadState;
+type CheckoutState = 'idle' | 'loading';
+type FeedbackTone = 'error' | 'info' | 'success';
+
+interface HomeScreenProps {
+  session: AuthSession;
+}
+
+interface CheckoutFeedback {
+  message: string;
+  tone: FeedbackTone;
+}
+
+const formatCurrency = (value: number) =>
+  `$${value.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+const normalizeText = (value: string) => value.replace(/\s+/g, ' ').trim();
+
+const getProductName = (value: string) => normalizeText(value).toUpperCase();
+
+const getCustomerAddress = (value: string) => value.replace(/\s*\n\s*/g, '\n');
+
+const getInitials = (value: string) => {
+  const initials = normalizeText(value)
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(part => part[0]?.toUpperCase() ?? '')
+    .join('');
+
+  return initials || 'CU';
+};
+
+const sanitizeCurrencyInput = (value: string) => {
+  const sanitized = value.replace(/[^0-9.]/g, '');
+  const firstDotIndex = sanitized.indexOf('.');
+
+  if (firstDotIndex === -1) {
+    return sanitized;
+  }
+
+  const wholeNumber = sanitized.slice(0, firstDotIndex);
+  const decimals = sanitized.slice(firstDotIndex + 1).replace(/\./g, '');
+
+  return `${wholeNumber}.${decimals.slice(0, 2)}`;
+};
+
+const parseCurrencyInput = (value: string) => {
+  const parsedValue = Number.parseFloat(value);
+
+  return Number.isFinite(parsedValue) ? parsedValue : 0;
+};
+
+const ui = {
+  accent: palette.accent,
+  accentStrong: '#1F5A3B',
+  cardBorder: '#D9E4D3',
+  cardBorderStrong: '#C4D5BC',
+  dangerSoft: '#FCEBEC',
+  darkBorder: 'rgba(255,255,255,0.08)',
+  darkSurface: '#17271D',
+  darkSurfaceRaised: '#203328',
+  darkTextMuted: '#A7B8AE',
+  highlight: palette.primaryStrong,
+  highlightSoft: '#EEF6DA',
+  pageGlowPrimary: 'rgba(127, 169, 60, 0.16)',
+  pageGlowSecondary: 'rgba(41, 181, 84, 0.10)',
+  softSurface: '#F7FAF1',
+  softSurfaceStrong: '#EEF4E6',
+  textBody: '#45564C',
+  textHeading: '#203127',
+  textMuted: '#738278',
+};
+
+export const HomeScreen = ({session}: HomeScreenProps) => {
+  const {width} = useWindowDimensions();
+  const [view, setView] = useState<HomeView>('home');
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customersStatus, setCustomersStatus] = useState<LoadStatus>('idle');
+  const [customersError, setCustomersError] = useState<string | null>(null);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(
+    null,
+  );
+  const [products, setProducts] = useState<PersonalInventoryItem[]>([]);
+  const [productsStatus, setProductsStatus] = useState<LoadStatus>('idle');
+  const [productsError, setProductsError] = useState<string | null>(null);
+  const [selectedQuantities, setSelectedQuantities] = useState<
+    Record<number, number>
+  >({});
+  const [creditMemoInput, setCreditMemoInput] = useState('0');
+  const [containerDepositInput, setContainerDepositInput] = useState('0');
+  const [checkoutState, setCheckoutState] = useState<CheckoutState>('idle');
+  const [isSummaryVisible, setIsSummaryVisible] = useState(false);
+  const [isCustomerDetailsExpanded, setIsCustomerDetailsExpanded] =
+    useState(false);
+  const [checkoutFeedback, setCheckoutFeedback] =
+    useState<CheckoutFeedback | null>(null);
+
+  const contentWidth = getContentWidth(width);
+  const horizontalPadding = getHorizontalPadding(width);
+  const deviceType = getDeviceType(width);
+  const isTabletLayout = deviceType === 'tablet';
+  const isCompactLayout = deviceType === 'smallPhone' || deviceType === 'phone';
+  const twoColumnLayout =
+    deviceType === 'largePhone' || deviceType === 'tablet';
+  const layoutWidth = isTabletLayout
+    ? width - horizontalPadding * 2
+    : contentWidth;
+  const productCardLayoutStyle = isTabletLayout
+    ? styles.productCardThird
+    : twoColumnLayout
+    ? styles.productCardHalf
+    : null;
+  const screenContentStyle = [
+    styles.screenContent,
+    {paddingHorizontal: horizontalPadding},
+  ];
+  const sectionWidthStyle = {width: layoutWidth};
+  const titleSizeStyle = {fontSize: moderateScale(34, width, 0.28)};
+
+  const selectedProducts = products.filter(
+    product => (selectedQuantities[product.id] ?? 0) > 0,
+  );
+  const totalUnits = selectedProducts.reduce(
+    (sum, product) => sum + (selectedQuantities[product.id] ?? 0),
+    0,
+  );
+  const itemSubtotal = selectedProducts.reduce(
+    (sum, product) =>
+      sum + product.unitPrice * (selectedQuantities[product.id] ?? 0),
+    0,
+  );
+  const creditMemoAmount = parseCurrencyInput(creditMemoInput);
+  const containerDepositAmount = parseCurrencyInput(containerDepositInput);
+  const totalPayable = itemSubtotal - creditMemoAmount + containerDepositAmount;
+  const generateBillDisabled =
+    !selectedProducts.length || checkoutState === 'loading' || totalPayable < 0;
+  const selectedItemsLabel =
+    selectedProducts.length === 1
+      ? '1 item selected'
+      : `${selectedProducts.length} items selected`;
+
+  const resetCheckoutState = () => {
+    setCreditMemoInput('0');
+    setContainerDepositInput('0');
+    setCheckoutFeedback(null);
+    setCheckoutState('idle');
+  };
+
+  const loadCustomers = async () => {
+    setCustomersStatus('loading');
+    setCustomersError(null);
+    setCheckoutFeedback(null);
+
+    const response = await orderService.getCustomers(session.token);
+
+    if (!response.ok || !response.data) {
+      setCustomers([]);
+      setCustomersStatus('error');
+      setCustomersError(response.message ?? 'Unable to load customers.');
+      return;
+    }
+
+    setCustomers(response.data);
+    setCustomersStatus(response.data.length ? 'ready' : 'empty');
+  };
+
+  const openPlaceOrders = () => {
+    setView('customers');
+    setSelectedCustomer(null);
+    setSelectedQuantities({});
+    setIsSummaryVisible(false);
+    setIsCustomerDetailsExpanded(false);
+    resetCheckoutState();
+    loadCustomers();
+  };
+
+  const loadProducts = async () => {
+    setProductsStatus('loading');
+    setProductsError(null);
+    setCheckoutFeedback(null);
+
+    const response = await orderService.getInventory(session.token);
+
+    if (!response.ok || !response.data) {
+      setProducts([]);
+      setProductsStatus('error');
+      setProductsError(response.message ?? 'Unable to load products.');
+      return;
+    }
+
+    const personalInventory = response.data
+      .map(item => {
+        const personalStock =
+          item.sub_inventories.find(
+            subInventory => subInventory.user_id === session.user.id,
+          )?.quantity ?? 0;
+
+        if (personalStock <= 0) {
+          return null;
+        }
+
+        return {
+          ...item,
+          heldQuantity: personalStock,
+          unitPrice: Number.parseFloat(item.price) || 0,
+        };
+      })
+      .filter((item): item is PersonalInventoryItem => item !== null);
+
+    setProducts(personalInventory);
+    setProductsStatus(personalInventory.length ? 'ready' : 'empty');
+  };
+
+  const selectCustomer = (customer: Customer) => {
+    setSelectedCustomer(customer);
+    setSelectedQuantities({});
+    setIsSummaryVisible(false);
+    setIsCustomerDetailsExpanded(false);
+    resetCheckoutState();
+    setView('products');
+    loadProducts();
+  };
+
+  const updateQuantity = (product: PersonalInventoryItem, delta: number) => {
+    setCheckoutFeedback(null);
+    setSelectedQuantities(current => {
+      const nextQuantity = Math.max(
+        0,
+        Math.min(product.heldQuantity, (current[product.id] ?? 0) + delta),
+      );
+
+      if (nextQuantity === 0) {
+        const nextSelections = {...current};
+        delete nextSelections[product.id];
+        return nextSelections;
+      }
+
+      return {
+        ...current,
+        [product.id]: nextQuantity,
+      };
+    });
+  };
+
+  const removeProduct = (productId: number) => {
+    setCheckoutFeedback(null);
+    setSelectedQuantities(current => {
+      if (!(productId in current)) {
+        return current;
+      }
+
+      const nextSelections = {...current};
+      delete nextSelections[productId];
+      return nextSelections;
+    });
+  };
+
+  const setCreditValue = (value: string) => {
+    setCheckoutFeedback(null);
+    setCreditMemoInput(sanitizeCurrencyInput(value));
+  };
+
+  const setDepositValue = (value: string) => {
+    setCheckoutFeedback(null);
+    setContainerDepositInput(sanitizeCurrencyInput(value));
+  };
+
+  const handleGenerateBill = async () => {
+    if (!selectedCustomer || !selectedProducts.length) {
+      return;
+    }
+
+    if (totalPayable < 0) {
+      setCheckoutFeedback({
+        message: 'Total payable cannot be negative. Adjust credits or deposit.',
+        tone: 'error',
+      });
+      return;
+    }
+
+    setCheckoutState('loading');
+    setCheckoutFeedback(null);
+
+    const orderResponse = await orderService.createOrder(session.token, {
+      customerId: selectedCustomer.id,
+      loadNumber: 'POS',
+      notes: `POS Sale to ${selectedCustomer.name}`,
+      totalAmount: totalPayable.toFixed(2),
+      totalCredits: creditMemoAmount.toFixed(2),
+      totalDeposit: containerDepositAmount.toFixed(2),
+    });
+
+    if (!orderResponse.ok || !orderResponse.data) {
+      setCheckoutState('idle');
+      setCheckoutFeedback({
+        message: orderResponse.message ?? 'Unable to create the order.',
+        tone: 'error',
+      });
+      return;
+    }
+
+    const pdfResponse = await pdfService.generateOrderBill({
+      createdAt: orderResponse.data.created_at,
+      customerAccountId: selectedCustomer.account_id || 'N/A',
+      customerAddress: getCustomerAddress(selectedCustomer.address),
+      customerName: selectedCustomer.name,
+      customerPhone: selectedCustomer.phone,
+      items: selectedProducts.map(product => {
+        const quantity = selectedQuantities[product.id] ?? 0;
+
+        return {
+          itemNumber: product.item_number,
+          lineTotal: quantity * product.unitPrice,
+          name: getProductName(product.item_name),
+          quantity,
+          unitPrice: product.unitPrice,
+        };
+      }),
+      notes: `POS Sale to ${selectedCustomer.name}`,
+      orderNumber: orderResponse.data.order_number,
+      salespersonName: session.user.name,
+      totalAmount: totalPayable,
+      totalCredits: creditMemoAmount,
+      totalDeposit: containerDepositAmount,
+    });
+
+    setCheckoutState('idle');
+
+    if (!pdfResponse.ok || !pdfResponse.data) {
+      setCheckoutFeedback({
+        message: `Order ${
+          orderResponse.data.order_number
+        } saved, but the PDF bill could not be downloaded. ${
+          pdfResponse.message ?? ''
+        }`.trim(),
+        tone: 'info',
+      });
+      return;
+    }
+
+    setSelectedQuantities({});
+    setCreditMemoInput('0');
+    setContainerDepositInput('0');
+    setCheckoutFeedback({
+      message: pdfResponse.data.opened
+        ? `Order ${orderResponse.data.order_number} saved and bill PDF downloaded.`
+        : `Order ${orderResponse.data.order_number} saved and PDF downloaded. Open it from your Downloads folder if it did not open automatically.`,
+      tone: 'success',
+    });
+  };
+
+  const renderHome = () => (
+    <View style={[styles.heroCard, sectionWidthStyle]}>
+      <Text style={styles.eyebrow}>
+        WELCOME {session.user.name.toUpperCase()}
+      </Text>
+      <Text style={[styles.title, titleSizeStyle]}>Sales Workspace</Text>
+      <Text style={styles.subtitle}>
+        Signed in as {session.user.role}. Start a new route order from the
+        center action below.
+      </Text>
+
+      <Pressable onPress={openPlaceOrders} style={styles.placeOrdersButton}>
+        <View style={styles.placeOrdersIcon}>
+          <View style={styles.plusHorizontal} />
+          <View style={styles.plusVertical} />
+        </View>
+        <Text style={styles.placeOrdersLabel}>PLACE ORDERS</Text>
+        <Text style={styles.placeOrdersCaption}>
+          Load customers and begin a new sale
+        </Text>
+      </Pressable>
+    </View>
+  );
+
+  const renderCustomers = () => (
+    <>
+      <View style={[styles.topBackRow, sectionWidthStyle]}>
+        <Pressable onPress={() => setView('home')} style={styles.backButton}>
+          <Text style={styles.backButtonLabel}>{'<'}</Text>
+        </Pressable>
+      </View>
+
+      <View style={[styles.sectionCard, sectionWidthStyle]}>
+        <View style={styles.sectionHeader}>
+          <View style={styles.sectionHeaderText}>
+            <Text style={styles.sectionEyebrow}>STEP 1</Text>
+            <Text style={styles.sectionTitle}>Select Customer</Text>
+            <Text style={styles.sectionSubtitle}>
+              Choose the customer for this order. We will open only the products
+              available in your personal stock.
+            </Text>
+          </View>
+        </View>
+
+        {customersError ? (
+          <InlineMessage message={customersError} tone="error" />
+        ) : null}
+
+        {customersStatus === 'loading' || customersStatus === 'idle' ? (
+          <StatePanel
+            message="Fetching the latest customer accounts from the backend."
+            mode="loading"
+            title="Loading customers"
+          />
+        ) : null}
+
+        {customersStatus === 'error' ? (
+          <StatePanel
+            actionLabel="Retry"
+            message="We could not load the customer list right now."
+            mode="error"
+            onAction={loadCustomers}
+            title="Customer request failed"
+          />
+        ) : null}
+
+        {customersStatus === 'empty' ? (
+          <StatePanel
+            actionLabel="Refresh"
+            message="The API returned an empty customer list."
+            mode="empty"
+            onAction={loadCustomers}
+            title="No customers found"
+          />
+        ) : null}
+
+        {customersStatus === 'ready' ? (
+          <View style={styles.cardStack}>
+            {customers.map(customer => (
+              <Pressable
+                key={customer.id}
+                onPress={() => selectCustomer(customer)}
+                style={({pressed}) => [
+                  styles.customerCard,
+                  pressed ? styles.customerCardPressed : null,
+                ]}>
+                <View style={styles.customerCardHeader}>
+                  <View style={styles.customerIdentity}>
+                    <View style={styles.customerAvatar}>
+                      <Text style={styles.customerAvatarLabel}>
+                        {getInitials(customer.name)}
+                      </Text>
+                    </View>
+                    <View style={styles.customerIdentityText}>
+                      <Text style={styles.customerMiniLabel}>Customer</Text>
+                      <Text style={styles.customerAccountText}>
+                        {customer.account_id || 'No account id'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.paymentPill}>
+                    <Text style={styles.paymentPillLabel}>
+                      {customer.payment_type || 'Payment'}
+                    </Text>
+                  </View>
+                </View>
+
+                <Text numberOfLines={2} style={styles.customerName}>
+                  {normalizeText(customer.name)}
+                </Text>
+                <Text numberOfLines={2} style={styles.customerCompany}>
+                  {normalizeText(
+                    customer.registered_company_name || customer.name,
+                  )}
+                </Text>
+
+                <View style={styles.customerMetaGroup}>
+                  <View style={styles.customerMetaRow}>
+                    <Text style={styles.customerMetaIcon}>Phone</Text>
+                    <Text style={styles.customerMetaValue}>
+                      {customer.phone || 'No phone'}
+                    </Text>
+                  </View>
+                  <View style={styles.customerMetaRow}>
+                    <Text style={styles.customerMetaIcon}>Address</Text>
+                    <Text numberOfLines={3} style={styles.customerMetaValue}>
+                      {getCustomerAddress(customer.address)}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.customerFooter}>
+                  <View style={styles.accountPill}>
+                    <Text style={styles.accountPillLabel}>
+                      Account {customer.account_id || 'N/A'}
+                    </Text>
+                  </View>
+                  <Text style={styles.customerActionLabel}>View Products</Text>
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+      </View>
+    </>
+  );
+
+  const renderProducts = () => (
+    <>
+      <View style={[styles.topBackRow, sectionWidthStyle]}>
+        <Pressable
+          onPress={() => setView('customers')}
+          style={styles.backButton}>
+          <Text style={styles.backButtonLabel}>{'<'}</Text>
+        </Pressable>
+      </View>
+
+      <View style={[styles.sectionCard, sectionWidthStyle]}>
+        <View style={styles.sectionHeader}>
+          <View style={styles.sectionHeaderText}>
+            <Text style={styles.sectionEyebrow}>STEP 2</Text>
+            <Text style={styles.sectionTitle}>Select Products</Text>
+            <Text style={styles.sectionSubtitle}>
+              Add products for {selectedCustomer?.name ?? 'your customer'}. The
+              order summary stays hidden until you open it.
+            </Text>
+          </View>
+          <View style={styles.inventoryPill}>
+            <Text style={styles.inventoryPillLabel}>
+              Personal inventory only
+            </Text>
+          </View>
+        </View>
+
+        {selectedCustomer ? (
+          <View style={styles.selectedCustomerPanel}>
+            <Pressable
+              onPress={() => setIsCustomerDetailsExpanded(current => !current)}
+              style={({pressed}) => [
+                styles.selectedCustomerToggle,
+                pressed ? styles.selectedCustomerTogglePressed : null,
+              ]}>
+              <Text
+                numberOfLines={1}
+                style={styles.selectedCustomerCompactName}>
+                {normalizeText(selectedCustomer.name)}
+              </Text>
+              <Text style={styles.selectedCustomerToggleLabel}>
+                {isCustomerDetailsExpanded ? 'Hide Details' : 'View Details'}
+              </Text>
+            </Pressable>
+
+            {isCustomerDetailsExpanded ? (
+              <View style={styles.selectedCustomerDetails}>
+                {normalizeText(
+                  selectedCustomer.registered_company_name ||
+                    selectedCustomer.name,
+                ) !== normalizeText(selectedCustomer.name) ? (
+                  <Text
+                    numberOfLines={2}
+                    style={styles.selectedCustomerCompany}>
+                    {normalizeText(
+                      selectedCustomer.registered_company_name ||
+                        selectedCustomer.name,
+                    )}
+                  </Text>
+                ) : null}
+
+                <View style={styles.selectedCustomerDetailsTags}>
+                  <View style={styles.metaTag}>
+                    <Text style={styles.metaTagLabel}>
+                      Account {selectedCustomer.account_id || 'N/A'}
+                    </Text>
+                  </View>
+                  <View style={styles.metaTag}>
+                    <Text style={styles.metaTagLabel}>
+                      {selectedCustomer.payment_type || 'Payment'}
+                    </Text>
+                  </View>
+                  <View style={styles.metaTag}>
+                    <Text style={styles.metaTagLabel}>
+                      {selectedCustomer.phone || 'No phone'}
+                    </Text>
+                  </View>
+                </View>
+
+                <Text numberOfLines={3} style={styles.selectedCustomerAddress}>
+                  {getCustomerAddress(selectedCustomer.address)}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+
+        {productsError ? (
+          <InlineMessage message={productsError} tone="error" />
+        ) : null}
+
+        {productsStatus === 'loading' || productsStatus === 'idle' ? (
+          <StatePanel
+            message="Loading only the products assigned to this salesperson."
+            mode="loading"
+            title="Preparing inventory"
+          />
+        ) : null}
+
+        {productsStatus === 'error' ? (
+          <StatePanel
+            actionLabel="Retry"
+            message="We could not load personal inventory for this order."
+            mode="error"
+            onAction={loadProducts}
+            title="Inventory request failed"
+          />
+        ) : null}
+
+        {productsStatus === 'empty' ? (
+          <StatePanel
+            actionLabel="Reload"
+            message="This user does not currently have any personal stock available."
+            mode="empty"
+            onAction={loadProducts}
+            title="No personal inventory"
+          />
+        ) : null}
+
+        {productsStatus === 'ready' ? (
+          <>
+            <View style={styles.productsSectionHeader}>
+              <Text style={styles.productsSectionTitle}>
+                Available Products
+              </Text>
+              <Text style={styles.productsSectionSubtitle}>
+                Tap any card to add one unit. Selected products stay easy to
+                remove without cluttering the screen.
+              </Text>
+            </View>
+
+            <View style={styles.productsWrap}>
+              {products.map(product => {
+                const quantity = selectedQuantities[product.id] ?? 0;
+
+                return (
+                  <Pressable
+                    key={product.id}
+                    onPress={() => updateQuantity(product, 1)}
+                    style={({pressed}) => [
+                      styles.productCard,
+                      productCardLayoutStyle,
+                      quantity > 0 ? styles.productCardSelected : null,
+                      pressed ? styles.productCardPressed : null,
+                    ]}>
+                    <View style={styles.productCardTopRow}>
+                      <View style={styles.productSkuPill}>
+                        <Text
+                          numberOfLines={1}
+                          style={styles.productSkuPillLabel}>
+                          SKU {product.item_number || 'N/A'}
+                        </Text>
+                      </View>
+                      <Text style={styles.productHeldLabel}>
+                        {product.heldQuantity} available
+                      </Text>
+                    </View>
+
+                    <Text numberOfLines={2} style={styles.productName}>
+                      {normalizeText(product.item_name)}
+                    </Text>
+                    <Text style={styles.productPrice}>
+                      {formatCurrency(product.unitPrice)}
+                    </Text>
+
+                    {quantity > 0 ? (
+                      <View style={styles.productCardFooter}>
+                        <View style={styles.productSelectedPill}>
+                          <Text style={styles.productSelectedPillLabel}>
+                            {quantity} in order
+                          </Text>
+                        </View>
+                        <Text style={styles.productHintSecondary}>
+                          Tap to add more
+                        </Text>
+                      </View>
+                    ) : (
+                      <Text style={styles.productHint}>Tap card to add</Text>
+                    )}
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <View style={styles.orderOverviewCard}>
+              <View style={styles.orderOverviewHeader}>
+                <View style={styles.orderOverviewTextWrap}>
+                  <Text style={styles.orderOverviewEyebrow}>Current Order</Text>
+                  <Text style={styles.orderOverviewTitle}>
+                    {selectedProducts.length
+                      ? selectedItemsLabel
+                      : 'No items added yet'}
+                  </Text>
+                  <Text style={styles.orderOverviewSubtitle}>
+                    Review totals only when you need them. Quick remove cards
+                    stay visible while the summary is hidden.
+                  </Text>
+                </View>
+
+                <Pressable
+                  onPress={() => setIsSummaryVisible(current => !current)}
+                  style={({pressed}) => [
+                    styles.summaryToggleButton,
+                    pressed ? styles.summaryToggleButtonPressed : null,
+                  ]}>
+                  <Text style={styles.summaryToggleButtonLabel}>
+                    {isSummaryVisible ? 'Hide Summary' : 'Show Summary'}
+                  </Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.orderOverviewStats}>
+                <View style={styles.orderOverviewStat}>
+                  <Text style={styles.orderOverviewStatLabel}>Items</Text>
+                  <Text style={styles.orderOverviewStatValue}>
+                    {selectedProducts.length}
+                  </Text>
+                </View>
+                <View style={styles.orderOverviewStat}>
+                  <Text style={styles.orderOverviewStatLabel}>Units</Text>
+                  <Text style={styles.orderOverviewStatValue}>
+                    {totalUnits}
+                  </Text>
+                </View>
+                <View style={styles.orderOverviewStat}>
+                  <Text style={styles.orderOverviewStatLabel}>Payable</Text>
+                  <Text style={styles.orderOverviewStatValue}>
+                    {formatCurrency(totalPayable)}
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            {!isSummaryVisible ? (
+              selectedProducts.length ? (
+                <View style={styles.selectedItemsCard}>
+                  <View style={styles.selectedItemsHeader}>
+                    <Text style={styles.selectedItemsTitle}>Added Items</Text>
+                    <Text style={styles.selectedItemsSubtitle}>
+                      Tap X to remove a product from the order instantly.
+                    </Text>
+                  </View>
+
+                  <View style={styles.selectedItemsList}>
+                    {selectedProducts.map(product => {
+                      const quantity = selectedQuantities[product.id] ?? 0;
+                      const lineTotal = quantity * product.unitPrice;
+
+                      return (
+                        <View key={product.id} style={styles.selectedItemCard}>
+                          <View style={styles.selectedItemTopRow}>
+                            <Text
+                              numberOfLines={2}
+                              style={styles.selectedItemName}>
+                              {normalizeText(product.item_name)}
+                            </Text>
+                            <Pressable
+                              onPress={() => removeProduct(product.id)}
+                              style={({pressed}) => [
+                                styles.selectedItemRemoveButton,
+                                pressed
+                                  ? styles.selectedItemRemoveButtonPressed
+                                  : null,
+                              ]}>
+                              <Text
+                                style={styles.selectedItemRemoveButtonLabel}>
+                                X
+                              </Text>
+                            </Pressable>
+                          </View>
+
+                          <Text style={styles.selectedItemMeta}>
+                            Qty {quantity} of {product.heldQuantity} available
+                          </Text>
+                          <Text style={styles.selectedItemTotal}>
+                            {formatCurrency(lineTotal)}
+                          </Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              ) : (
+                <View style={styles.selectedItemsEmptyCard}>
+                  <Text style={styles.selectedItemsEmptyTitle}>
+                    Start with any product card
+                  </Text>
+                  <Text style={styles.selectedItemsEmptyText}>
+                    Added items will appear here as removable cards, so mobile
+                    users can keep the page clean and still control the order.
+                  </Text>
+                </View>
+              )
+            ) : (
+              <View style={styles.summaryCard}>
+                <View style={styles.summaryHeader}>
+                  <View style={styles.summaryCartBadge}>
+                    <Text style={styles.summaryCartBadgeLabel}>
+                      {selectedProducts.length}
+                    </Text>
+                  </View>
+                  <View style={styles.summaryHeaderText}>
+                    <Text style={styles.summaryTitle}>Order Summary</Text>
+                    <Text style={styles.summarySubtitle}>
+                      {selectedCustomer?.name ?? 'Customer order'}
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={() => setIsSummaryVisible(false)}
+                    style={({pressed}) => [
+                      styles.summaryCloseButton,
+                      pressed ? styles.summaryCloseButtonPressed : null,
+                    ]}>
+                    <Text style={styles.summaryCloseButtonLabel}>X</Text>
+                  </Pressable>
+                </View>
+
+                {selectedProducts.length ? (
+                  <View style={styles.summaryList}>
+                    {selectedProducts.map(product => {
+                      const quantity = selectedQuantities[product.id] ?? 0;
+                      const lineTotal = quantity * product.unitPrice;
+
+                      return (
+                        <View key={product.id} style={styles.summaryItem}>
+                          <View style={styles.summaryItemTopRow}>
+                            <View style={styles.summaryItemContent}>
+                              <Text
+                                numberOfLines={2}
+                                style={styles.summaryItemName}>
+                                {normalizeText(product.item_name)}
+                              </Text>
+                              <Text style={styles.summaryItemMeta}>
+                                {formatCurrency(product.unitPrice)} each
+                              </Text>
+                              <Text style={styles.summaryItemTotal}>
+                                {formatCurrency(lineTotal)}
+                              </Text>
+                            </View>
+
+                            <Pressable
+                              onPress={() => removeProduct(product.id)}
+                              style={({pressed}) => [
+                                styles.summaryRemoveButton,
+                                pressed
+                                  ? styles.summaryRemoveButtonPressed
+                                  : null,
+                              ]}>
+                              <Text style={styles.summaryRemoveButtonLabel}>
+                                X
+                              </Text>
+                            </Pressable>
+                          </View>
+
+                          <View style={styles.summaryItemFooter}>
+                            <Text style={styles.summaryItemStock}>
+                              {quantity} in order of {product.heldQuantity}{' '}
+                              available
+                            </Text>
+
+                            <View style={styles.quantityPanel}>
+                              <Pressable
+                                onPress={() => updateQuantity(product, -1)}
+                                style={({pressed}) => [
+                                  styles.quantityButton,
+                                  pressed ? styles.quantityButtonPressed : null,
+                                ]}>
+                                <Text style={styles.quantityButtonLabel}>
+                                  -
+                                </Text>
+                              </Pressable>
+
+                              <View style={styles.quantityBadge}>
+                                <Text style={styles.quantityValue}>
+                                  {quantity}
+                                </Text>
+                                <Text style={styles.quantityLimit}>Units</Text>
+                              </View>
+
+                              <Pressable
+                                onPress={() => updateQuantity(product, 1)}
+                                style={({pressed}) => [
+                                  styles.quantityButton,
+                                  pressed ? styles.quantityButtonPressed : null,
+                                ]}>
+                                <Text style={styles.quantityButtonLabel}>
+                                  +
+                                </Text>
+                              </Pressable>
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </View>
+                ) : (
+                  <View style={styles.summaryEmptyCard}>
+                    <Text style={styles.summaryEmptyTitle}>
+                      Order summary is empty
+                    </Text>
+                    <Text style={styles.summaryEmptyText}>
+                      Add products first, then open this panel whenever you want
+                      to review totals and create the bill.
+                    </Text>
+                  </View>
+                )}
+
+                <View style={styles.adjustmentsRow}>
+                  <View style={styles.adjustmentCard}>
+                    <Text style={styles.adjustmentLabel}>Credit Memo (-)</Text>
+                    <TextInput
+                      keyboardType="decimal-pad"
+                      onChangeText={setCreditValue}
+                      placeholder="0.00"
+                      placeholderTextColor={ui.darkTextMuted}
+                      style={styles.adjustmentInput}
+                      value={creditMemoInput}
+                    />
+                  </View>
+
+                  <View style={styles.adjustmentCard}>
+                    <Text style={styles.adjustmentLabel}>
+                      Container Deposit (+)
+                    </Text>
+                    <TextInput
+                      keyboardType="decimal-pad"
+                      onChangeText={setDepositValue}
+                      placeholder="0.00"
+                      placeholderTextColor={ui.darkTextMuted}
+                      style={styles.adjustmentInput}
+                      value={containerDepositInput}
+                    />
+                  </View>
+                </View>
+
+                {checkoutFeedback ? (
+                  <InlineMessage
+                    message={checkoutFeedback.message}
+                    tone={checkoutFeedback.tone}
+                  />
+                ) : null}
+
+                <View style={styles.summaryStatsRow}>
+                  <View style={styles.summaryStatCard}>
+                    <Text style={styles.summaryFooterLabel}>Total Units</Text>
+                    <Text style={styles.summaryStatValue}>{totalUnits}</Text>
+                  </View>
+                  <View style={styles.summaryStatCard}>
+                    <Text style={styles.summaryFooterLabel}>Item Subtotal</Text>
+                    <Text style={styles.summaryStatValue}>
+                      {formatCurrency(itemSubtotal)}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.payableBar}>
+                  <View style={styles.payableBarTextWrap}>
+                    <Text style={styles.summaryFooterLabel}>Total Payable</Text>
+                    <Text style={styles.summaryFooterAmount}>
+                      {formatCurrency(totalPayable)}
+                    </Text>
+                  </View>
+
+                  <Pressable
+                    disabled={generateBillDisabled}
+                    onPress={handleGenerateBill}
+                    style={({pressed}) => [
+                      styles.generateBillButton,
+                      isCompactLayout ? styles.generateBillButtonFull : null,
+                      generateBillDisabled
+                        ? styles.generateBillButtonDisabled
+                        : null,
+                      pressed && !generateBillDisabled
+                        ? styles.generateBillButtonPressed
+                        : null,
+                    ]}>
+                    {checkoutState === 'loading' ? (
+                      <ActivityIndicator color={palette.white} />
+                    ) : (
+                      <Text style={styles.generateBillButtonLabel}>
+                        Generate Bill
+                      </Text>
+                    )}
+                  </Pressable>
+                </View>
+              </View>
+            )}
+          </>
+        ) : null}
+      </View>
+    </>
+  );
+
+  return (
+    <ScreenContainer contentContainerStyle={screenContentStyle}>
+      <View style={styles.backgroundGlowPrimary} />
+      <View style={styles.backgroundGlowSecondary} />
+
+      {view === 'home' ? renderHome() : null}
+      {view === 'customers' ? renderCustomers() : null}
+      {view === 'products' ? renderProducts() : null}
+    </ScreenContainer>
+  );
+};
+
+const styles = StyleSheet.create({
+  accountPill: {
+    backgroundColor: ui.softSurfaceStrong,
+    borderColor: ui.cardBorderStrong,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  accountPillLabel: {
+    color: ui.textBody,
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  adjustmentCard: {
+    flex: 1,
+    minWidth: 132,
+  },
+  adjustmentInput: {
+    backgroundColor: ui.darkSurfaceRaised,
+    borderColor: ui.darkBorder,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    color: palette.white,
+    fontSize: 17,
+    fontWeight: '800',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  adjustmentLabel: {
+    color: ui.darkTextMuted,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xs,
+  },
+  adjustmentsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    marginBottom: spacing.lg,
+    marginTop: spacing.xl,
+  },
+  backButton: {
+    alignItems: 'center',
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    height: 42,
+    justifyContent: 'center',
+    width: 42,
+  },
+  backButtonLabel: {
+    color: ui.textHeading,
+    fontSize: 22,
+    fontWeight: '900',
+    marginTop: -2,
+  },
+  backgroundGlowPrimary: {
+    backgroundColor: ui.pageGlowPrimary,
+    borderRadius: radii.pill,
+    height: 260,
+    position: 'absolute',
+    right: -60,
+    top: 16,
+    width: 260,
+  },
+  backgroundGlowSecondary: {
+    backgroundColor: ui.pageGlowSecondary,
+    borderRadius: radii.pill,
+    height: 220,
+    left: -90,
+    position: 'absolute',
+    top: 220,
+    width: 220,
+  },
+  cardStack: {
+    gap: spacing.lg,
+  },
+  customerAccountText: {
+    color: ui.textHeading,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  customerActionLabel: {
+    color: ui.accentStrong,
+    fontSize: 14,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  customerAvatar: {
+    alignItems: 'center',
+    backgroundColor: `${ui.accent}15`,
+    borderRadius: radii.pill,
+    height: 52,
+    justifyContent: 'center',
+    width: 52,
+  },
+  customerAvatarLabel: {
+    color: ui.accentStrong,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  customerCard: {
+    backgroundColor: '#FCFDF9',
+    borderColor: ui.cardBorder,
+    borderRadius: radii.xl,
+    borderWidth: 1,
+    padding: spacing.xl,
+    ...shadowPresets.card,
+  },
+  customerCardHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: spacing.lg,
+  },
+  customerCardPressed: {
+    opacity: 0.96,
+  },
+  customerCompany: {
+    color: ui.textMuted,
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 22,
+    marginBottom: spacing.lg,
+  },
+  customerFooter: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    justifyContent: 'space-between',
+  },
+  customerFocusAvatar: {
+    alignItems: 'center',
+    backgroundColor: ui.highlightSoft,
+    borderRadius: radii.pill,
+    height: 56,
+    justifyContent: 'center',
+    marginRight: spacing.md,
+    width: 56,
+  },
+  customerFocusAvatarLabel: {
+    color: ui.accentStrong,
+    fontSize: 20,
+    fontWeight: '900',
+  },
+  customerFocusCard: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    marginBottom: spacing.xl,
+    padding: spacing.lg,
+  },
+  customerFocusCompany: {
+    color: ui.textMuted,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  customerFocusEyebrow: {
+    color: ui.accentStrong,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xxs,
+    textTransform: 'uppercase',
+  },
+  customerFocusHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    marginBottom: spacing.md,
+  },
+  customerFocusName: {
+    color: ui.textHeading,
+    fontSize: 20,
+    fontWeight: '900',
+    marginBottom: spacing.xxs,
+  },
+  customerFocusTags: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  customerFocusText: {
+    flex: 1,
+  },
+  customerIdentity: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    minWidth: 0,
+  },
+  customerIdentityText: {
+    flex: 1,
+    marginLeft: spacing.md,
+    minWidth: 0,
+  },
+  customerMetaGroup: {
+    borderTopColor: ui.cardBorder,
+    borderTopWidth: 1,
+    marginBottom: spacing.lg,
+    paddingTop: spacing.lg,
+  },
+  customerMetaIcon: {
+    color: ui.accentStrong,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+    marginRight: spacing.sm,
+    width: 54,
+  },
+  customerMetaRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    marginBottom: spacing.sm,
+  },
+  customerMetaValue: {
+    color: ui.textBody,
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 21,
+  },
+  customerMiniLabel: {
+    color: ui.textMuted,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xxs,
+    textTransform: 'uppercase',
+  },
+  customerName: {
+    color: ui.textHeading,
+    fontSize: 27,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+  },
+  eyebrow: {
+    color: ui.textMuted,
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 1.1,
+    marginBottom: spacing.lg,
+    textAlign: 'center',
+  },
+  generateBillButton: {
+    alignItems: 'center',
+    backgroundColor: ui.highlight,
+    borderRadius: radii.pill,
+    justifyContent: 'center',
+    minHeight: 56,
+    minWidth: 180,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.md,
+  },
+  generateBillButtonDisabled: {
+    backgroundColor: '#3C4B42',
+    opacity: 0.72,
+  },
+  generateBillButtonFull: {
+    width: '100%',
+  },
+  generateBillButtonLabel: {
+    color: palette.white,
+    fontSize: 15,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+  },
+  generateBillButtonPressed: {
+    opacity: 0.94,
+  },
+  heroCard: {
+    alignItems: 'center',
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: 34,
+    borderWidth: 1,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.xxxl,
+    ...shadowPresets.card,
+  },
+  inventoryPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: ui.highlightSoft,
+    borderRadius: radii.pill,
+    marginLeft: 'auto',
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  inventoryPillLabel: {
+    color: ui.accentStrong,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  metaTag: {
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorderStrong,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  metaTagLabel: {
+    color: ui.textBody,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  orderOverviewCard: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    marginBottom: spacing.lg,
+    padding: spacing.lg,
+  },
+  orderOverviewEyebrow: {
+    color: ui.accentStrong,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xxs,
+    textTransform: 'uppercase',
+  },
+  orderOverviewHeader: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    justifyContent: 'space-between',
+    marginBottom: spacing.md,
+  },
+  orderOverviewStat: {
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    flex: 1,
+    minWidth: 96,
+    padding: spacing.md,
+  },
+  orderOverviewStatLabel: {
+    color: ui.textMuted,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xs,
+    textTransform: 'uppercase',
+  },
+  orderOverviewStats: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+  },
+  orderOverviewStatValue: {
+    color: ui.textHeading,
+    fontSize: 20,
+    fontWeight: '900',
+  },
+  orderOverviewSubtitle: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  orderOverviewTextWrap: {
+    flex: 1,
+    minWidth: 180,
+  },
+  orderOverviewTitle: {
+    color: ui.textHeading,
+    fontSize: 22,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+  },
+  payableBar: {
+    alignItems: 'center',
+    borderTopColor: ui.darkBorder,
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    justifyContent: 'space-between',
+    marginTop: spacing.xl,
+    paddingTop: spacing.xl,
+  },
+  payableBarTextWrap: {
+    flex: 1,
+    minWidth: 160,
+  },
+  paymentPill: {
+    backgroundColor: ui.highlightSoft,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  paymentPillLabel: {
+    color: ui.accentStrong,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  placeOrdersButton: {
+    alignItems: 'center',
+    backgroundColor: ui.darkSurface,
+    borderRadius: 32,
+    marginTop: spacing.xxl,
+    paddingHorizontal: spacing.xxl,
+    paddingVertical: spacing.xxl,
+    width: '100%',
+  },
+  placeOrdersCaption: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 14,
+    fontWeight: '600',
+    marginTop: spacing.xs,
+    textAlign: 'center',
+  },
+  placeOrdersIcon: {
+    alignItems: 'center',
+    backgroundColor: ui.highlight,
+    borderRadius: radii.pill,
+    height: 88,
+    justifyContent: 'center',
+    marginBottom: spacing.lg,
+    position: 'relative',
+    width: 88,
+  },
+  placeOrdersLabel: {
+    color: palette.white,
+    fontSize: 19,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+  },
+  plusHorizontal: {
+    backgroundColor: palette.white,
+    borderRadius: radii.pill,
+    height: 6,
+    width: 34,
+  },
+  plusVertical: {
+    backgroundColor: palette.white,
+    borderRadius: radii.pill,
+    height: 34,
+    position: 'absolute',
+    width: 6,
+  },
+  productCard: {
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: 16,
+    borderWidth: 1,
+    minHeight: 152,
+    padding: spacing.md,
+    width: '100%',
+    ...shadowPresets.soft,
+  },
+  productCardFooter: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    justifyContent: 'space-between',
+    marginTop: 'auto',
+  },
+  productCardHalf: {
+    width: '48.5%',
+  },
+  productCardThird: {
+    width: '32.2%',
+  },
+  productCardPressed: {
+    opacity: 0.96,
+  },
+  productCardSelected: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.highlight,
+    shadowColor: ui.highlight,
+  },
+  productCardTopRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: spacing.md,
+  },
+  productHeldLabel: {
+    color: ui.textMuted,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  productHint: {
+    color: ui.textMuted,
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 'auto',
+  },
+  productHintSecondary: {
+    color: ui.textMuted,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  productName: {
+    color: ui.textHeading,
+    fontSize: 16,
+    fontWeight: '900',
+    lineHeight: 22,
+    marginBottom: spacing.sm,
+  },
+  productPrice: {
+    color: ui.accentStrong,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  productSelectedPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: ui.highlightSoft,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  productSelectedPillLabel: {
+    color: ui.accentStrong,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  productsSectionHeader: {
+    marginBottom: spacing.lg,
+  },
+  productsSectionSubtitle: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  productsSectionTitle: {
+    color: ui.textHeading,
+    fontSize: 22,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+  },
+  productsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    marginBottom: spacing.md,
+  },
+  productSkuPill: {
+    backgroundColor: ui.highlightSoft,
+    borderRadius: radii.pill,
+    maxWidth: '58%',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  productSkuPillLabel: {
+    color: ui.accentStrong,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  quantityButton: {
+    alignItems: 'center',
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorderStrong,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
+  },
+  quantityBadge: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderColor: ui.darkBorder,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    minWidth: 64,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  quantityButtonLabel: {
+    color: ui.textHeading,
+    fontSize: 20,
+    fontWeight: '900',
+    lineHeight: 22,
+  },
+  quantityButtonPressed: {
+    backgroundColor: ui.highlightSoft,
+  },
+  quantityLimit: {
+    color: ui.darkTextMuted,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  quantityPanel: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    justifyContent: 'center',
+  },
+  quantityValue: {
+    color: palette.white,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  selectedCustomerAddress: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  selectedCustomerCompactName: {
+    color: ui.textHeading,
+    flex: 1,
+    fontSize: 18,
+    fontWeight: '900',
+    marginRight: spacing.md,
+  },
+  selectedCustomerCompany: {
+    color: ui.textMuted,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+    marginBottom: spacing.md,
+  },
+  selectedCustomerDetails: {
+    borderTopColor: ui.cardBorder,
+    borderTopWidth: 1,
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
+  },
+  selectedCustomerDetailsTags: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  selectedCustomerPanel: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    marginBottom: spacing.lg,
+    padding: spacing.md,
+  },
+  selectedCustomerToggle: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  selectedCustomerToggleLabel: {
+    color: ui.accentStrong,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  selectedCustomerTogglePressed: {
+    opacity: 0.9,
+  },
+  screenContent: {
+    alignItems: 'center',
+    paddingVertical: spacing.xxl,
+  },
+  sectionCard: {
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: 34,
+    borderWidth: 1,
+    padding: spacing.xl,
+    ...shadowPresets.card,
+  },
+  sectionEyebrow: {
+    color: ui.textMuted,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 1,
+    marginBottom: 2,
+  },
+  sectionHeader: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: spacing.xl,
+  },
+  sectionHeaderText: {
+    flex: 1,
+    minWidth: 180,
+  },
+  sectionSubtitle: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  sectionTitle: {
+    color: ui.textHeading,
+    fontSize: 28,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+  },
+  selectedItemCard: {
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    padding: spacing.md,
+  },
+  selectedItemMeta: {
+    color: ui.textMuted,
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: spacing.xs,
+  },
+  selectedItemName: {
+    color: ui.textHeading,
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '900',
+    lineHeight: 22,
+    marginRight: spacing.md,
+  },
+  selectedItemRemoveButton: {
+    alignItems: 'center',
+    backgroundColor: ui.dangerSoft,
+    borderRadius: radii.pill,
+    height: 30,
+    justifyContent: 'center',
+    width: 30,
+  },
+  selectedItemRemoveButtonLabel: {
+    color: palette.danger,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  selectedItemRemoveButtonPressed: {
+    opacity: 0.88,
+  },
+  selectedItemsCard: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    marginBottom: spacing.xl,
+    padding: spacing.lg,
+  },
+  selectedItemsEmptyCard: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.lg,
+    borderStyle: 'dashed',
+    borderWidth: 1,
+    marginBottom: spacing.xl,
+    padding: spacing.lg,
+  },
+  selectedItemsEmptyText: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  selectedItemsEmptyTitle: {
+    color: ui.textHeading,
+    fontSize: 18,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+  },
+  selectedItemsHeader: {
+    marginBottom: spacing.md,
+  },
+  selectedItemsList: {
+    gap: spacing.md,
+  },
+  selectedItemsSubtitle: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  selectedItemsTitle: {
+    color: ui.textHeading,
+    fontSize: 20,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+  },
+  selectedItemTopRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: spacing.sm,
+  },
+  selectedItemTotal: {
+    color: ui.accentStrong,
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  subtitle: {
+    color: ui.textMuted,
+    fontSize: 16,
+    lineHeight: 24,
+    maxWidth: 420,
+    textAlign: 'center',
+  },
+  summaryCard: {
+    backgroundColor: ui.darkSurface,
+    borderColor: ui.darkBorder,
+    borderRadius: 28,
+    borderWidth: 1,
+    marginBottom: spacing.xl,
+    padding: spacing.xl,
+  },
+  summaryCartBadge: {
+    alignItems: 'center',
+    backgroundColor: ui.highlight,
+    borderRadius: radii.pill,
+    height: 46,
+    justifyContent: 'center',
+    marginRight: spacing.md,
+    width: 46,
+  },
+  summaryCartBadgeLabel: {
+    color: palette.white,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  summaryCloseButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: radii.pill,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
+  },
+  summaryCloseButtonLabel: {
+    color: palette.white,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  summaryCloseButtonPressed: {
+    opacity: 0.88,
+  },
+  summaryEmptyCard: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: ui.darkBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    marginBottom: spacing.md,
+    padding: spacing.lg,
+  },
+  summaryEmptyText: {
+    color: ui.darkTextMuted,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  summaryEmptyTitle: {
+    color: palette.white,
+    fontSize: 18,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+  },
+  summaryFooterAmount: {
+    color: palette.white,
+    fontSize: 28,
+    fontWeight: '900',
+  },
+  summaryFooterLabel: {
+    color: ui.darkTextMuted,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xs,
+  },
+  summaryHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    marginBottom: spacing.xl,
+  },
+  summaryHeaderText: {
+    flex: 1,
+  },
+  summaryItem: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: ui.darkBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    padding: spacing.lg,
+  },
+  summaryItemContent: {
+    flex: 1,
+  },
+  summaryItemFooter: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    justifyContent: 'space-between',
+    marginTop: spacing.md,
+  },
+  summaryItemMeta: {
+    color: ui.darkTextMuted,
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: spacing.xs,
+  },
+  summaryItemName: {
+    color: palette.white,
+    fontSize: 17,
+    fontWeight: '900',
+    lineHeight: 22,
+    marginBottom: spacing.xs,
+  },
+  summaryItemStock: {
+    color: ui.darkTextMuted,
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    minWidth: 140,
+  },
+  summaryItemTotal: {
+    color: '#B8E972',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  summaryItemTopRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: spacing.md,
+    justifyContent: 'space-between',
+  },
+  summaryList: {
+    gap: spacing.md,
+  },
+  summaryRemoveButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(214,84,98,0.18)',
+    borderRadius: radii.pill,
+    height: 32,
+    justifyContent: 'center',
+    width: 32,
+  },
+  summaryRemoveButtonLabel: {
+    color: '#FFC6CF',
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  summaryRemoveButtonPressed: {
+    opacity: 0.88,
+  },
+  summaryStatCard: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: ui.darkBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    flex: 1,
+    minWidth: 132,
+    padding: spacing.md,
+  },
+  summaryStatsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+  },
+  summaryStatValue: {
+    color: palette.white,
+    fontSize: 24,
+    fontWeight: '900',
+  },
+  summarySubtitle: {
+    color: ui.darkTextMuted,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  summaryToggleButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: ui.highlight,
+    borderRadius: radii.pill,
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  summaryToggleButtonLabel: {
+    color: palette.white,
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  summaryToggleButtonPressed: {
+    opacity: 0.9,
+  },
+  summaryTitle: {
+    color: palette.white,
+    fontSize: 24,
+    fontWeight: '900',
+    marginBottom: 2,
+  },
+  title: {
+    color: ui.textHeading,
+    fontWeight: '900',
+    marginBottom: spacing.md,
+    textAlign: 'center',
+  },
+  topBackRow: {
+    alignItems: 'flex-start',
+    marginBottom: spacing.md,
+  },
+});

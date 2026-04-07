@@ -1,28 +1,67 @@
-import {AuthSession, LoginRequest, ServiceResult} from '../types/auth';
+import {
+  AuthSession,
+  AuthUser,
+  LoginRequest,
+  ServiceResult,
+} from '../types/auth';
 
-const wait = (duration: number): Promise<void> =>
-  new Promise(resolve => {
-    setTimeout(resolve, duration);
-  });
+const LOGIN_ENDPOINT =
+  'https://vendor-management-backend.vercel.app/api/auth/login';
+
+interface LoginApiResponse {
+  success?: boolean;
+  token?: string;
+  user?: AuthUser;
+  message?: string;
+}
+
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return 'Unable to sign in right now. Please try again.';
+};
 
 export const authService = {
   async login(request: LoginRequest): Promise<ServiceResult<AuthSession>> {
-    await wait(900);
+    try {
+      const response = await fetch(LOGIN_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: request.email.trim(),
+          password: request.password,
+        }),
+      });
 
-    if (request.identifier.trim().toLowerCase().includes('error')) {
+      const payload = (await response.json()) as LoginApiResponse;
+
+      if (!response.ok || !payload.success || !payload.token || !payload.user) {
+        return {
+          ok: false,
+          message:
+            payload.message ??
+            'Sign-in failed. Please check your email and password.',
+        };
+      }
+
+      return {
+        ok: true,
+        data: {
+          token: payload.token,
+          user: payload.user,
+          userName: payload.user.name,
+        },
+      };
+    } catch (error) {
       return {
         ok: false,
-        message:
-          'Simulated sign-in failure. Replace src/services/authService.ts with your real API call.',
+        message: getErrorMessage(error),
       };
     }
-
-    return {
-      ok: true,
-      data: {
-        token: 'demo-token',
-        userName: 'Vendor Manager',
-      },
-    };
   },
 };

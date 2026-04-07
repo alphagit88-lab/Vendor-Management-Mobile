@@ -19,6 +19,7 @@ class MainApplication : Application(), ReactApplication {
         override fun getPackages(): List<ReactPackage> =
             PackageList(this).packages.apply {
               // Add packages that cannot be autolinked here when needed.
+              add(OrderPdfPackage())
             }
 
         override fun getJSMainModuleName(): String = "index"
