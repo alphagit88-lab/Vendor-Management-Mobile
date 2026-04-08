@@ -1,5 +1,6 @@
 import {ServiceResult} from '../types/auth';
 import {
+  Category,
   CreateOrderRequest,
   CreatedOrder,
   Customer,
@@ -128,6 +129,10 @@ export const orderService = {
 
   getCustomers(token: string) {
     return getCollection<Customer>('customers', token);
+  },
+
+  getCategories(token: string) {
+    return getCollection<Category>('categories', token);
   },
 
   getInventory(token: string) {

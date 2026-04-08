@@ -1,8 +1,10 @@
 import React, {useState} from 'react';
 import {
   ActivityIndicator,
+  Image,
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -25,7 +27,7 @@ import {
 import {radii, shadowPresets} from '../theme/shape';
 import {spacing} from '../theme/spacing';
 import {AuthSession, ContentLoadState} from '../types/auth';
-import {Customer, PersonalInventoryItem} from '../types/order';
+import {Category, Customer, PersonalInventoryItem} from '../types/order';
 
 type HomeView = 'home' | 'customers' | 'products';
 type LoadStatus = 'idle' | ContentLoadState;
@@ -51,6 +53,11 @@ const formatCurrency = (value: number) =>
 const normalizeText = (value: string) => value.replace(/\s+/g, ' ').trim();
 
 const getProductName = (value: string) => normalizeText(value).toUpperCase();
+const ALL_PRODUCT_CATEGORY = 'all-categories';
+const getProductCategoryLabel = (value: string) =>
+  normalizeText(value) || 'Uncategorized';
+const getProductCategoryValue = (value: string) =>
+  getProductCategoryLabel(value).toLowerCase();
 
 const getCustomerAddress = (value: string) => value.replace(/\s*\n\s*/g, '\n');
 
@@ -85,6 +92,9 @@ const parseCurrencyInput = (value: string) => {
   return Number.isFinite(parsedValue) ? parsedValue : 0;
 };
 
+const backIcon = require('../assets/images/left.png');
+const dropdownIcon = require('../assets/images/down.png');
+
 const ui = {
   accent: palette.accent,
   accentStrong: '#1F5A3B',
@@ -118,6 +128,13 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
   const [products, setProducts] = useState<PersonalInventoryItem[]>([]);
   const [productsStatus, setProductsStatus] = useState<LoadStatus>('idle');
   const [productsError, setProductsError] = useState<string | null>(null);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [categoriesStatus, setCategoriesStatus] = useState<LoadStatus>('idle');
+  const [categoriesError, setCategoriesError] = useState<string | null>(null);
+  const [isCategoryDropdownVisible, setIsCategoryDropdownVisible] =
+    useState(false);
+  const [selectedProductCategory, setSelectedProductCategory] =
+    useState(ALL_PRODUCT_CATEGORY);
   const [productSearchQuery, setProductSearchQuery] = useState('');
   const [selectedQuantities, setSelectedQuantities] = useState<
     Record<number, number>
@@ -157,23 +174,62 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     {paddingHorizontal: horizontalPadding},
   ];
   const sectionWidthStyle = {width: layoutWidth};
+  const categoryDropdownCardStyle = {width: Math.min(layoutWidth, 420)};
   const quantityModalCardStyle = {width: Math.min(layoutWidth, 360)};
   const titleSizeStyle = {fontSize: moderateScale(34, width, 0.28)};
+  const productCategories = Array.from(
+    new Map(
+      [
+        ...categories.map(category => category.name),
+        ...products.map(product => product.category_name),
+      ].map(categoryName => {
+        const categoryLabel = getProductCategoryLabel(categoryName);
+
+        return [categoryLabel.toLowerCase(), categoryLabel];
+      }),
+    ),
+  )
+    .sort((firstCategory, secondCategory) =>
+      firstCategory[1].localeCompare(secondCategory[1]),
+    )
+    .map(([value, label]) => ({label, value}));
+  const productCategoryOptions = [
+    {label: 'All Categories', value: ALL_PRODUCT_CATEGORY},
+    ...productCategories,
+  ];
+  const isCategoryDropdownDisabled = categoriesStatus === 'loading';
+  const selectedProductCategoryLabel =
+    productCategoryOptions.find(
+      category => category.value === selectedProductCategory,
+    )?.label ?? 'All Categories';
   const normalizedProductSearchQuery =
     normalizeText(productSearchQuery).toLowerCase();
-  const filteredProducts = normalizedProductSearchQuery
-    ? products.filter(product => {
-        const normalizedProductName = normalizeText(
-          product.item_name,
-        ).toLowerCase();
-        const normalizedProductSku = (product.item_number ?? '').toLowerCase();
+  const filteredProducts = products.filter(product => {
+    const normalizedProductCategory = getProductCategoryValue(
+      product.category_name,
+    );
+    const matchesCategory =
+      selectedProductCategory === ALL_PRODUCT_CATEGORY ||
+      normalizedProductCategory === selectedProductCategory;
 
-        return (
-          normalizedProductName.includes(normalizedProductSearchQuery) ||
-          normalizedProductSku.includes(normalizedProductSearchQuery)
-        );
-      })
-    : products;
+    if (!matchesCategory) {
+      return false;
+    }
+
+    if (!normalizedProductSearchQuery) {
+      return true;
+    }
+
+    const normalizedProductName = normalizeText(
+      product.item_name,
+    ).toLowerCase();
+    const normalizedProductSku = (product.item_number ?? '').toLowerCase();
+
+    return (
+      normalizedProductName.includes(normalizedProductSearchQuery) ||
+      normalizedProductSku.includes(normalizedProductSearchQuery)
+    );
+  });
 
   const selectedProducts = products.filter(
     product => (selectedQuantities[product.id] ?? 0) > 0,
@@ -228,6 +284,10 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     setCheckoutState('idle');
   };
 
+  const closeCategoryDropdown = () => {
+    setIsCategoryDropdownVisible(false);
+  };
+
   const closeQuantityModal = () => {
     setQuantityModalProduct(null);
     setCustomQuantityInput('1');
@@ -266,15 +326,35 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     setCustomersStatus(response.data.length ? 'ready' : 'empty');
   };
 
+  const loadCategories = async () => {
+    setCategoriesStatus('loading');
+    setCategoriesError(null);
+
+    const response = await orderService.getCategories(session.token);
+
+    if (!response.ok || !response.data) {
+      setCategories([]);
+      setCategoriesStatus('error');
+      setCategoriesError(response.message ?? 'Unable to load categories.');
+      return;
+    }
+
+    setCategories(response.data);
+    setCategoriesStatus(response.data.length ? 'ready' : 'empty');
+  };
+
   const openPlaceOrders = () => {
     setView('customers');
     setSelectedCustomer(null);
+    closeCategoryDropdown();
+    setSelectedProductCategory(ALL_PRODUCT_CATEGORY);
     setProductSearchQuery('');
     setSelectedQuantities({});
     setIsSummaryVisible(false);
     setIsCustomerDetailsExpanded(false);
     closeQuantityModal();
     resetCheckoutState();
+    loadCategories();
     loadCustomers();
   };
 
@@ -317,6 +397,8 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
   const selectCustomer = (customer: Customer) => {
     setSelectedCustomer(customer);
+    closeCategoryDropdown();
+    setSelectedProductCategory(ALL_PRODUCT_CATEGORY);
     setProductSearchQuery('');
     setSelectedQuantities({});
     setIsSummaryVisible(false);
@@ -324,6 +406,9 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     closeQuantityModal();
     resetCheckoutState();
     setView('products');
+    if (categoriesStatus === 'idle' || categoriesStatus === 'error') {
+      loadCategories();
+    }
     loadProducts();
   };
 
@@ -513,7 +598,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     <>
       <View style={[styles.topBackRow, sectionWidthStyle]}>
         <Pressable onPress={() => setView('home')} style={styles.backButton}>
-          <Text style={styles.backButtonLabel}>{'<'}</Text>
+          <Image source={backIcon} style={styles.backButtonIcon} />
         </Pressable>
       </View>
 
@@ -639,7 +724,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
         <Pressable
           onPress={() => setView('customers')}
           style={styles.backButton}>
-          <Text style={styles.backButtonLabel}>{'<'}</Text>
+          <Image source={backIcon} style={styles.backButtonIcon} />
         </Pressable>
       </View>
 
@@ -758,6 +843,38 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
               <Text style={styles.productsSectionTitle}>
                 Available Products
               </Text>
+              <Text style={styles.productCategoryLabel}>Category</Text>
+              <Pressable
+                disabled={isCategoryDropdownDisabled}
+                onPress={() => setIsCategoryDropdownVisible(true)}
+                style={({pressed}) => [
+                  styles.productCategoryDropdown,
+                  isCategoryDropdownDisabled
+                    ? styles.productCategoryDropdownDisabled
+                    : null,
+                  pressed && !isCategoryDropdownDisabled
+                    ? styles.productCategoryDropdownPressed
+                    : null,
+                ]}>
+                <View style={styles.productCategoryDropdownRow}>
+                  <Text
+                    numberOfLines={1}
+                    style={[
+                      styles.productCategoryDropdownValue,
+                      isCategoryDropdownDisabled
+                        ? styles.productCategoryDropdownValueMuted
+                        : null,
+                    ]}>
+                    {isCategoryDropdownDisabled
+                      ? 'Loading categories...'
+                      : selectedProductCategoryLabel}
+                  </Text>
+                  <Image
+                    source={dropdownIcon}
+                    style={styles.productCategoryDropdownChevron}
+                  />
+                </View>
+              </Pressable>
               <TextInput
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -768,6 +885,13 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                 value={productSearchQuery}
               />
             </View>
+
+            {categoriesError ? (
+              <InlineMessage
+                message="We could not load the full category list. Showing available categories only."
+                tone="info"
+              />
+            ) : null}
 
             {filteredProducts.length ? (
               <View style={styles.productsWrap}>
@@ -899,7 +1023,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                   No matching products
                 </Text>
                 <Text style={styles.productSearchEmptyText}>
-                  Try a different product name or SKU.
+                  Try a different category, product name, or SKU.
                 </Text>
               </View>
             )}
@@ -1307,6 +1431,68 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
           </View>
         </View>
       </Modal>
+
+      <Modal
+        animationType="fade"
+        onRequestClose={closeCategoryDropdown}
+        transparent
+        visible={isCategoryDropdownVisible}>
+        <View style={styles.quantityModalOverlay}>
+          <Pressable
+            onPress={closeCategoryDropdown}
+            style={styles.quantityModalBackdrop}
+          />
+
+          <View
+            style={[styles.categoryDropdownCard, categoryDropdownCardStyle]}>
+            <Text style={styles.categoryDropdownEyebrow}>Category Filter</Text>
+            <Text style={styles.categoryDropdownTitle}>Select category</Text>
+            <Text style={styles.categoryDropdownSubtitle}>
+              Choose one category to filter the product list.
+            </Text>
+
+            <ScrollView
+              contentContainerStyle={styles.categoryDropdownOptions}
+              showsVerticalScrollIndicator={false}
+              style={styles.categoryDropdownScroll}>
+              {productCategoryOptions.map(category => (
+                <Pressable
+                  key={category.value}
+                  onPress={() => {
+                    setSelectedProductCategory(category.value);
+                    closeCategoryDropdown();
+                  }}
+                  style={({pressed}) => [
+                    styles.categoryDropdownOption,
+                    selectedProductCategory === category.value
+                      ? styles.categoryDropdownOptionActive
+                      : null,
+                    pressed ? styles.categoryDropdownOptionPressed : null,
+                  ]}>
+                  <Text
+                    style={[
+                      styles.categoryDropdownOptionLabel,
+                      selectedProductCategory === category.value
+                        ? styles.categoryDropdownOptionLabelActive
+                        : null,
+                    ]}>
+                    {category.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            <Pressable
+              onPress={closeCategoryDropdown}
+              style={({pressed}) => [
+                styles.categoryDropdownCloseButton,
+                pressed ? styles.categoryDropdownCloseButtonPressed : null,
+              ]}>
+              <Text style={styles.categoryDropdownCloseButtonLabel}>Close</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </>
   );
 
@@ -1392,11 +1578,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     width: 42,
   },
-  backButtonLabel: {
-    color: ui.textHeading,
-    fontSize: 22,
-    fontWeight: '900',
-    marginTop: -2,
+  backButtonIcon: {
+    height: 18,
+    resizeMode: 'contain',
+    width: 18,
   },
   backgroundGlowPrimary: {
     backgroundColor: ui.pageGlowPrimary,
@@ -1916,7 +2101,130 @@ const styles = StyleSheet.create({
     opacity: 0.92,
   },
   productsSectionHeader: {
+    gap: spacing.sm,
     marginBottom: spacing.lg,
+  },
+  categoryDropdownCard: {
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    maxHeight: '78%',
+    padding: spacing.xl,
+    ...shadowPresets.card,
+  },
+  categoryDropdownCloseButton: {
+    alignItems: 'center',
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    justifyContent: 'center',
+    marginTop: spacing.lg,
+    minHeight: 48,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  categoryDropdownCloseButtonLabel: {
+    color: ui.textHeading,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  categoryDropdownCloseButtonPressed: {
+    opacity: 0.92,
+  },
+  categoryDropdownEyebrow: {
+    color: ui.accentStrong,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xxs,
+    textTransform: 'uppercase',
+  },
+  categoryDropdownOption: {
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  categoryDropdownOptionActive: {
+    backgroundColor: ui.highlightSoft,
+    borderColor: ui.highlight,
+  },
+  categoryDropdownOptionLabel: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  categoryDropdownOptionLabelActive: {
+    color: ui.accentStrong,
+  },
+  categoryDropdownOptionPressed: {
+    opacity: 0.9,
+  },
+  categoryDropdownOptions: {
+    gap: spacing.sm,
+    paddingBottom: spacing.xs,
+  },
+  categoryDropdownScroll: {
+    maxHeight: 320,
+  },
+  categoryDropdownSubtitle: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+    marginBottom: spacing.lg,
+  },
+  categoryDropdownTitle: {
+    color: ui.textHeading,
+    fontSize: 24,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+  },
+  productCategoryDropdown: {
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: 18,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 48,
+    paddingHorizontal: spacing.lg,
+  },
+  productCategoryDropdownChevron: {
+    height: 12,
+    resizeMode: 'contain',
+    width: 12,
+  },
+  productCategoryDropdownDisabled: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorderStrong,
+  },
+  productCategoryDropdownPressed: {
+    opacity: 0.94,
+  },
+  productCategoryDropdownRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    justifyContent: 'space-between',
+  },
+  productCategoryDropdownValue: {
+    color: ui.textHeading,
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  productCategoryDropdownValueMuted: {
+    color: ui.textMuted,
+  },
+  productCategoryLabel: {
+    color: ui.textHeading,
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.3,
   },
   productSearchEmptyCard: {
     alignItems: 'center',

@@ -37,6 +37,13 @@ export interface InventoryItem {
   sub_inventories: InventorySubItem[];
 }
 
+export interface Category {
+  id: number;
+  name: string;
+  description: string | null;
+  created_at: string;
+}
+
 export interface PersonalInventoryItem extends InventoryItem {
   heldQuantity: number;
   unitPrice: number;
