@@ -1,6 +1,7 @@
 import React, {useState} from 'react';
 import {
   ActivityIndicator,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -32,6 +33,7 @@ type CheckoutState = 'idle' | 'loading';
 type FeedbackTone = 'error' | 'info' | 'success';
 
 interface HomeScreenProps {
+  onSignOut: () => void;
   session: AuthSession;
 }
 
@@ -104,7 +106,7 @@ const ui = {
   textMuted: '#738278',
 };
 
-export const HomeScreen = ({session}: HomeScreenProps) => {
+export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
   const {width} = useWindowDimensions();
   const [view, setView] = useState<HomeView>('home');
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -116,6 +118,7 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
   const [products, setProducts] = useState<PersonalInventoryItem[]>([]);
   const [productsStatus, setProductsStatus] = useState<LoadStatus>('idle');
   const [productsError, setProductsError] = useState<string | null>(null);
+  const [productSearchQuery, setProductSearchQuery] = useState('');
   const [selectedQuantities, setSelectedQuantities] = useState<
     Record<number, number>
   >({});
@@ -125,6 +128,12 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
   const [isSummaryVisible, setIsSummaryVisible] = useState(false);
   const [isCustomerDetailsExpanded, setIsCustomerDetailsExpanded] =
     useState(false);
+  const [quantityModalProduct, setQuantityModalProduct] =
+    useState<PersonalInventoryItem | null>(null);
+  const [customQuantityInput, setCustomQuantityInput] = useState('1');
+  const [customQuantityError, setCustomQuantityError] = useState<string | null>(
+    null,
+  );
   const [checkoutFeedback, setCheckoutFeedback] =
     useState<CheckoutFeedback | null>(null);
 
@@ -148,7 +157,23 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
     {paddingHorizontal: horizontalPadding},
   ];
   const sectionWidthStyle = {width: layoutWidth};
+  const quantityModalCardStyle = {width: Math.min(layoutWidth, 360)};
   const titleSizeStyle = {fontSize: moderateScale(34, width, 0.28)};
+  const normalizedProductSearchQuery =
+    normalizeText(productSearchQuery).toLowerCase();
+  const filteredProducts = normalizedProductSearchQuery
+    ? products.filter(product => {
+        const normalizedProductName = normalizeText(
+          product.item_name,
+        ).toLowerCase();
+        const normalizedProductSku = (product.item_number ?? '').toLowerCase();
+
+        return (
+          normalizedProductName.includes(normalizedProductSearchQuery) ||
+          normalizedProductSku.includes(normalizedProductSearchQuery)
+        );
+      })
+    : products;
 
   const selectedProducts = products.filter(
     product => (selectedQuantities[product.id] ?? 0) > 0,
@@ -171,12 +196,56 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
     selectedProducts.length === 1
       ? '1 item selected'
       : `${selectedProducts.length} items selected`;
+  const quantityModalRequestedQuantity = Number.parseInt(
+    customQuantityInput,
+    10,
+  );
+  const quantityModalRequestedUnits = Number.isInteger(
+    quantityModalRequestedQuantity,
+  )
+    ? quantityModalRequestedQuantity
+    : 0;
+  const quantityModalCurrentQuantity = quantityModalProduct
+    ? selectedQuantities[quantityModalProduct.id] ?? 0
+    : 0;
+  const quantityModalBaseRemainingQuantity = quantityModalProduct
+    ? Math.max(
+        quantityModalProduct.heldQuantity - quantityModalCurrentQuantity,
+        0,
+      )
+    : 0;
+  const quantityModalPreviewRemainingQuantity = quantityModalProduct
+    ? Math.max(
+        quantityModalBaseRemainingQuantity - quantityModalRequestedUnits,
+        0,
+      )
+    : 0;
 
   const resetCheckoutState = () => {
     setCreditMemoInput('0');
     setContainerDepositInput('0');
     setCheckoutFeedback(null);
     setCheckoutState('idle');
+  };
+
+  const closeQuantityModal = () => {
+    setQuantityModalProduct(null);
+    setCustomQuantityInput('1');
+    setCustomQuantityError(null);
+  };
+
+  const openQuantityModal = (product: PersonalInventoryItem) => {
+    setQuantityModalProduct(product);
+    setCustomQuantityInput('1');
+    setCustomQuantityError(null);
+  };
+
+  const handleCustomQuantityInput = (value: string) => {
+    setCustomQuantityInput(value.replace(/[^0-9]/g, ''));
+
+    if (customQuantityError) {
+      setCustomQuantityError(null);
+    }
   };
 
   const loadCustomers = async () => {
@@ -200,9 +269,11 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
   const openPlaceOrders = () => {
     setView('customers');
     setSelectedCustomer(null);
+    setProductSearchQuery('');
     setSelectedQuantities({});
     setIsSummaryVisible(false);
     setIsCustomerDetailsExpanded(false);
+    closeQuantityModal();
     resetCheckoutState();
     loadCustomers();
   };
@@ -246,9 +317,11 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
 
   const selectCustomer = (customer: Customer) => {
     setSelectedCustomer(customer);
+    setProductSearchQuery('');
     setSelectedQuantities({});
     setIsSummaryVisible(false);
     setIsCustomerDetailsExpanded(false);
+    closeQuantityModal();
     resetCheckoutState();
     setView('products');
     loadProducts();
@@ -273,6 +346,36 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
         [product.id]: nextQuantity,
       };
     });
+  };
+
+  const addCustomQuantity = () => {
+    if (!quantityModalProduct) {
+      return;
+    }
+
+    if (quantityModalBaseRemainingQuantity <= 0) {
+      setCustomQuantityError('No remaining stock is available for this item.');
+      return;
+    }
+
+    const requestedQuantity = Number.parseInt(customQuantityInput, 10);
+
+    if (!Number.isInteger(requestedQuantity) || requestedQuantity <= 0) {
+      setCustomQuantityError('Enter a quantity greater than 0.');
+      return;
+    }
+
+    if (requestedQuantity > quantityModalBaseRemainingQuantity) {
+      setCustomQuantityError(
+        `You can add only ${quantityModalBaseRemainingQuantity} more unit${
+          quantityModalBaseRemainingQuantity === 1 ? '' : 's'
+        }.`,
+      );
+      return;
+    }
+
+    updateQuantity(quantityModalProduct, requestedQuantity);
+    closeQuantityModal();
   };
 
   const removeProduct = (productId: number) => {
@@ -655,64 +758,151 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
               <Text style={styles.productsSectionTitle}>
                 Available Products
               </Text>
-              <Text style={styles.productsSectionSubtitle}>
-                Tap any card to add one unit. Selected products stay easy to
-                remove without cluttering the screen.
-              </Text>
+              <TextInput
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={setProductSearchQuery}
+                placeholder="Search products by name or SKU"
+                placeholderTextColor={ui.textMuted}
+                style={styles.productSearchInput}
+                value={productSearchQuery}
+              />
             </View>
 
-            <View style={styles.productsWrap}>
-              {products.map(product => {
-                const quantity = selectedQuantities[product.id] ?? 0;
+            {filteredProducts.length ? (
+              <View style={styles.productsWrap}>
+                {filteredProducts.map(product => {
+                  const quantity = selectedQuantities[product.id] ?? 0;
+                  const remainingQuantity = Math.max(
+                    product.heldQuantity - quantity,
+                    0,
+                  );
 
-                return (
-                  <Pressable
-                    key={product.id}
-                    onPress={() => updateQuantity(product, 1)}
-                    style={({pressed}) => [
-                      styles.productCard,
-                      productCardLayoutStyle,
-                      quantity > 0 ? styles.productCardSelected : null,
-                      pressed ? styles.productCardPressed : null,
-                    ]}>
-                    <View style={styles.productCardTopRow}>
-                      <View style={styles.productSkuPill}>
-                        <Text
-                          numberOfLines={1}
-                          style={styles.productSkuPillLabel}>
-                          SKU {product.item_number || 'N/A'}
-                        </Text>
-                      </View>
-                      <Text style={styles.productHeldLabel}>
-                        {product.heldQuantity} available
-                      </Text>
-                    </View>
-
-                    <Text numberOfLines={2} style={styles.productName}>
-                      {normalizeText(product.item_name)}
-                    </Text>
-                    <Text style={styles.productPrice}>
-                      {formatCurrency(product.unitPrice)}
-                    </Text>
-
-                    {quantity > 0 ? (
-                      <View style={styles.productCardFooter}>
-                        <View style={styles.productSelectedPill}>
-                          <Text style={styles.productSelectedPillLabel}>
-                            {quantity} in order
+                  return (
+                    <Pressable
+                      key={product.id}
+                      onPress={() => {
+                        if (remainingQuantity > 0) {
+                          updateQuantity(product, 1);
+                        }
+                      }}
+                      style={({pressed}) => [
+                        styles.productCard,
+                        productCardLayoutStyle,
+                        quantity > 0 ? styles.productCardSelected : null,
+                        pressed && remainingQuantity > 0
+                          ? styles.productCardPressed
+                          : null,
+                      ]}>
+                      <View style={styles.productCardTopRow}>
+                        <View style={styles.productSkuPill}>
+                          <Text
+                            numberOfLines={1}
+                            style={styles.productSkuPillLabel}>
+                            SKU {product.item_number || 'N/A'}
                           </Text>
                         </View>
-                        <Text style={styles.productHintSecondary}>
-                          Tap to add more
+                        <Text style={styles.productHeldLabel}>
+                          {remainingQuantity} available
                         </Text>
                       </View>
-                    ) : (
-                      <Text style={styles.productHint}>Tap card to add</Text>
-                    )}
-                  </Pressable>
-                );
-              })}
-            </View>
+
+                      <Text numberOfLines={2} style={styles.productName}>
+                        {normalizeText(product.item_name)}
+                      </Text>
+                      <Text style={styles.productPrice}>
+                        {formatCurrency(product.unitPrice)}
+                      </Text>
+
+                      <View style={styles.productCardFooter}>
+                        {quantity > 0 ? (
+                          <View style={styles.productSelectedPill}>
+                            <Text style={styles.productSelectedPillLabel}>
+                              {quantity} in order
+                            </Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.productHint}>
+                            Use +1, -1, or Add
+                          </Text>
+                        )}
+
+                        <View style={styles.productCardActions}>
+                          <Pressable
+                            disabled={remainingQuantity === 0}
+                            onPress={event => {
+                              event.stopPropagation();
+                              updateQuantity(product, 1);
+                            }}
+                            style={({pressed}) => [
+                              styles.productStepButton,
+                              remainingQuantity === 0
+                                ? styles.productStepButtonDisabled
+                                : null,
+                              pressed && remainingQuantity > 0
+                                ? styles.productStepButtonPressed
+                                : null,
+                            ]}>
+                            <Text style={styles.productStepButtonLabel}>
+                              +1
+                            </Text>
+                          </Pressable>
+
+                          <Pressable
+                            disabled={quantity === 0}
+                            onPress={event => {
+                              event.stopPropagation();
+                              updateQuantity(product, -1);
+                            }}
+                            style={({pressed}) => [
+                              styles.productStepButton,
+                              quantity === 0
+                                ? styles.productStepButtonDisabled
+                                : null,
+                              pressed && quantity > 0
+                                ? styles.productStepButtonPressed
+                                : null,
+                            ]}>
+                            <Text style={styles.productStepButtonLabel}>
+                              -1
+                            </Text>
+                          </Pressable>
+
+                          <Pressable
+                            disabled={remainingQuantity === 0}
+                            onPress={event => {
+                              event.stopPropagation();
+                              openQuantityModal(product);
+                            }}
+                            style={({pressed}) => [
+                              styles.productCustomAddButton,
+                              remainingQuantity === 0
+                                ? styles.productCustomAddButtonDisabled
+                                : null,
+                              pressed && remainingQuantity > 0
+                                ? styles.productCustomAddButtonPressed
+                                : null,
+                            ]}>
+                            <Text style={styles.productCustomAddButtonLabel}>
+                              Add
+                            </Text>
+                          </Pressable>
+                        </View>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : (
+              <View style={styles.productSearchEmptyCard}>
+                <Text style={styles.productSearchEmptyTitle}>
+                  No matching products
+                </Text>
+                <Text style={styles.productSearchEmptyText}>
+                  Try a different product name or SKU.
+                </Text>
+              </View>
+            )}
 
             <View style={styles.orderOverviewCard}>
               <View style={styles.orderOverviewHeader}>
@@ -777,6 +967,10 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
                     {selectedProducts.map(product => {
                       const quantity = selectedQuantities[product.id] ?? 0;
                       const lineTotal = quantity * product.unitPrice;
+                      const remainingQuantity = Math.max(
+                        product.heldQuantity - quantity,
+                        0,
+                      );
 
                       return (
                         <View key={product.id} style={styles.selectedItemCard}>
@@ -802,7 +996,8 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
                           </View>
 
                           <Text style={styles.selectedItemMeta}>
-                            Qty {quantity} of {product.heldQuantity} available
+                            Qty {quantity} in order, {remainingQuantity}{' '}
+                            remaining
                           </Text>
                           <Text style={styles.selectedItemTotal}>
                             {formatCurrency(lineTotal)}
@@ -852,6 +1047,10 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
                     {selectedProducts.map(product => {
                       const quantity = selectedQuantities[product.id] ?? 0;
                       const lineTotal = quantity * product.unitPrice;
+                      const remainingQuantity = Math.max(
+                        product.heldQuantity - quantity,
+                        0,
+                      );
 
                       return (
                         <View key={product.id} style={styles.summaryItem}>
@@ -886,8 +1085,7 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
 
                           <View style={styles.summaryItemFooter}>
                             <Text style={styles.summaryItemStock}>
-                              {quantity} in order of {product.heldQuantity}{' '}
-                              available
+                              {quantity} in order, {remainingQuantity} remaining
                             </Text>
 
                             <View style={styles.quantityPanel}>
@@ -1020,6 +1218,95 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
           </>
         ) : null}
       </View>
+
+      <Modal
+        animationType="fade"
+        onRequestClose={closeQuantityModal}
+        transparent
+        visible={Boolean(quantityModalProduct)}>
+        <View style={styles.quantityModalOverlay}>
+          <Pressable
+            onPress={closeQuantityModal}
+            style={styles.quantityModalBackdrop}
+          />
+
+          <View style={[styles.quantityModalCard, quantityModalCardStyle]}>
+            <Text style={styles.quantityModalEyebrow}>Custom Add</Text>
+            <Text style={styles.quantityModalTitle}>Add quantity</Text>
+            <Text style={styles.quantityModalSubtitle}>
+              {quantityModalProduct
+                ? normalizeText(quantityModalProduct.item_name)
+                : 'Selected product'}
+            </Text>
+
+            <View style={styles.quantityModalStats}>
+              <View style={styles.quantityModalStatCard}>
+                <Text style={styles.quantityModalStatLabel}>In Order</Text>
+                <Text style={styles.quantityModalStatValue}>
+                  {quantityModalCurrentQuantity}
+                </Text>
+              </View>
+
+              <View style={styles.quantityModalStatCard}>
+                <Text style={styles.quantityModalStatLabel}>
+                  Remaining After Add
+                </Text>
+                <Text style={styles.quantityModalStatValue}>
+                  {quantityModalPreviewRemainingQuantity}
+                </Text>
+              </View>
+            </View>
+
+            <Text style={styles.quantityModalInputLabel}>Units to add</Text>
+            <TextInput
+              autoFocus
+              keyboardType="number-pad"
+              onChangeText={handleCustomQuantityInput}
+              placeholder="1"
+              placeholderTextColor={ui.darkTextMuted}
+              style={styles.quantityModalInput}
+              value={customQuantityInput}
+            />
+
+            <Text style={styles.quantityModalHint}>
+              Enter a whole number that does not exceed the remaining available
+              stock. Remaining updates while you type.
+            </Text>
+
+            {customQuantityError ? (
+              <InlineMessage message={customQuantityError} tone="error" />
+            ) : null}
+
+            <View style={styles.quantityModalActions}>
+              <Pressable
+                onPress={closeQuantityModal}
+                style={({pressed}) => [
+                  styles.quantityModalCancelButton,
+                  pressed ? styles.quantityModalCancelButtonPressed : null,
+                ]}>
+                <Text style={styles.quantityModalCancelButtonLabel}>
+                  Cancel
+                </Text>
+              </Pressable>
+
+              <Pressable
+                disabled={quantityModalBaseRemainingQuantity === 0}
+                onPress={addCustomQuantity}
+                style={({pressed}) => [
+                  styles.quantityModalConfirmButton,
+                  quantityModalBaseRemainingQuantity === 0
+                    ? styles.quantityModalConfirmButtonDisabled
+                    : null,
+                  pressed && quantityModalBaseRemainingQuantity > 0
+                    ? styles.quantityModalConfirmButtonPressed
+                    : null,
+                ]}>
+                <Text style={styles.quantityModalConfirmButtonLabel}>Add</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </>
   );
 
@@ -1027,6 +1314,22 @@ export const HomeScreen = ({session}: HomeScreenProps) => {
     <ScreenContainer contentContainerStyle={screenContentStyle}>
       <View style={styles.backgroundGlowPrimary} />
       <View style={styles.backgroundGlowSecondary} />
+      <View style={[styles.utilityRow, sectionWidthStyle]}>
+        <View style={styles.userBadge}>
+          <Text numberOfLines={1} style={styles.userBadgeLabel}>
+            {session.user.name}
+          </Text>
+        </View>
+
+        <Pressable
+          onPress={onSignOut}
+          style={({pressed}) => [
+            styles.signOutButton,
+            pressed ? styles.signOutButtonPressed : null,
+          ]}>
+          <Text style={styles.signOutButtonLabel}>Sign out</Text>
+        </Pressable>
+      </View>
 
       {view === 'home' ? renderHome() : null}
       {view === 'customers' ? renderCustomers() : null}
@@ -1518,6 +1821,14 @@ const styles = StyleSheet.create({
     borderColor: ui.highlight,
     shadowColor: ui.highlight,
   },
+  productCardActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    justifyContent: 'flex-end',
+    marginLeft: 'auto',
+  },
   productCardTopRow: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -1531,12 +1842,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.3,
   },
   productHint: {
-    color: ui.textMuted,
-    fontSize: 12,
-    fontWeight: '700',
-    marginTop: 'auto',
-  },
-  productHintSecondary: {
     color: ui.textMuted,
     fontSize: 12,
     fontWeight: '700',
@@ -1566,14 +1871,87 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 0.4,
   },
+  productCustomAddButton: {
+    alignItems: 'center',
+    backgroundColor: ui.highlight,
+    borderRadius: 12,
+    justifyContent: 'center',
+    minHeight: 32,
+    minWidth: 56,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  productCustomAddButtonDisabled: {
+    backgroundColor: ui.cardBorderStrong,
+  },
+  productCustomAddButtonLabel: {
+    color: palette.white,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  productCustomAddButtonPressed: {
+    opacity: 0.92,
+  },
+  productStepButton: {
+    alignItems: 'center',
+    backgroundColor: ui.darkSurfaceRaised,
+    borderRadius: 12,
+    justifyContent: 'center',
+    minHeight: 32,
+    minWidth: 42,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  productStepButtonDisabled: {
+    backgroundColor: ui.cardBorderStrong,
+  },
+  productStepButtonLabel: {
+    color: palette.white,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  productStepButtonPressed: {
+    opacity: 0.92,
+  },
   productsSectionHeader: {
     marginBottom: spacing.lg,
   },
-  productsSectionSubtitle: {
-    color: ui.textBody,
+  productSearchEmptyCard: {
+    alignItems: 'center',
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: 20,
+    borderWidth: 1,
+    marginBottom: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.xl,
+  },
+  productSearchEmptyText: {
+    color: ui.textMuted,
     fontSize: 14,
     fontWeight: '700',
     lineHeight: 20,
+    textAlign: 'center',
+  },
+  productSearchEmptyTitle: {
+    color: ui.textHeading,
+    fontSize: 17,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+    textAlign: 'center',
+  },
+  productSearchInput: {
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: 18,
+    borderWidth: 1,
+    color: ui.textHeading,
+    fontSize: 14,
+    fontWeight: '700',
+    minHeight: 48,
+    paddingHorizontal: spacing.lg,
   },
   productsSectionTitle: {
     color: ui.textHeading,
@@ -1628,6 +2006,145 @@ const styles = StyleSheet.create({
   },
   quantityButtonPressed: {
     backgroundColor: ui.highlightSoft,
+  },
+  quantityModalActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    justifyContent: 'flex-end',
+    marginTop: spacing.lg,
+  },
+  quantityModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  quantityModalCancelButton: {
+    alignItems: 'center',
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 48,
+    minWidth: 108,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  quantityModalCancelButtonLabel: {
+    color: ui.textHeading,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  quantityModalCancelButtonPressed: {
+    opacity: 0.92,
+  },
+  quantityModalCard: {
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    padding: spacing.xl,
+    ...shadowPresets.card,
+  },
+  quantityModalConfirmButton: {
+    alignItems: 'center',
+    backgroundColor: ui.highlight,
+    borderRadius: radii.md,
+    justifyContent: 'center',
+    minHeight: 48,
+    minWidth: 132,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  quantityModalConfirmButtonDisabled: {
+    backgroundColor: ui.cardBorderStrong,
+  },
+  quantityModalConfirmButtonLabel: {
+    color: palette.white,
+    fontSize: 14,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  quantityModalConfirmButtonPressed: {
+    opacity: 0.92,
+  },
+  quantityModalEyebrow: {
+    color: ui.accentStrong,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    marginBottom: spacing.xxs,
+    textTransform: 'uppercase',
+  },
+  quantityModalHint: {
+    color: ui.textMuted,
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  quantityModalInput: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorderStrong,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    color: ui.textHeading,
+    fontSize: 18,
+    fontWeight: '900',
+    marginBottom: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+  },
+  quantityModalInputLabel: {
+    color: ui.textHeading,
+    fontSize: 13,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+  },
+  quantityModalOverlay: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(23,39,29,0.36)',
+    flex: 1,
+    justifyContent: 'center',
+    padding: spacing.xl,
+  },
+  quantityModalStatCard: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    flex: 1,
+    minWidth: 96,
+    padding: spacing.md,
+  },
+  quantityModalStatLabel: {
+    color: ui.textMuted,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    marginBottom: spacing.xs,
+    textTransform: 'uppercase',
+  },
+  quantityModalStats: {
+    flexDirection: 'row',
+    gap: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  quantityModalStatValue: {
+    color: ui.textHeading,
+    fontSize: 20,
+    fontWeight: '900',
+  },
+  quantityModalSubtitle: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+    marginBottom: spacing.lg,
+  },
+  quantityModalTitle: {
+    color: ui.textHeading,
+    fontSize: 24,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
   },
   quantityLimit: {
     color: ui.darkTextMuted,
@@ -1843,6 +2360,27 @@ const styles = StyleSheet.create({
     maxWidth: 420,
     textAlign: 'center',
   },
+  signOutButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-end',
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 40,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  signOutButtonLabel: {
+    color: ui.textHeading,
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  signOutButtonPressed: {
+    opacity: 0.88,
+  },
   summaryCard: {
     backgroundColor: ui.darkSurface,
     borderColor: ui.darkBorder,
@@ -2047,6 +2585,28 @@ const styles = StyleSheet.create({
   },
   topBackRow: {
     alignItems: 'flex-start',
+    marginBottom: spacing.md,
+  },
+  userBadge: {
+    backgroundColor: ui.softSurfaceStrong,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    flexShrink: 1,
+    maxWidth: '62%',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  userBadgeLabel: {
+    color: ui.accentStrong,
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  utilityRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     marginBottom: spacing.md,
   },
 });

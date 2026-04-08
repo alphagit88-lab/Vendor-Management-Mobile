@@ -6,6 +6,11 @@ export interface LoginFormValues {
   password: string;
 }
 
+export interface StoredLoginCredentials {
+  email: string;
+  password: string;
+}
+
 export interface LoginScreenContent {
   badgeLabel: string;
   eyebrow: string;

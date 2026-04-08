@@ -1,6 +1,8 @@
-import {useState} from 'react';
+import {useEffect, useState} from 'react';
 
 import {authService} from '../services/authService';
+import {authSessionStorageService} from '../services/authSessionStorageService';
+import {rememberedCredentialsService} from '../services/rememberedCredentialsService';
 import {AuthSession, LoginFormValues, SubmitState} from '../types/auth';
 
 const defaultFormValues: LoginFormValues = {
@@ -25,8 +27,32 @@ const validateForm = (values: LoginFormValues): string | null => {
 export const useLoginScreen = () => {
   const [formValues, setFormValues] =
     useState<LoginFormValues>(defaultFormValues);
+  const [rememberMe, setRememberMe] = useState(false);
   const [submitState, setSubmitState] = useState<SubmitState>('idle');
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isActive = true;
+
+    const hydrateRememberedCredentials = async () => {
+      const rememberedCredentials = await rememberedCredentialsService.load();
+
+      if (!isActive || !rememberedCredentials) {
+        return;
+      }
+
+      setFormValues(current =>
+        current.email || current.password ? current : rememberedCredentials,
+      );
+      setRememberMe(true);
+    };
+
+    hydrateRememberedCredentials();
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
 
   const setEmail = (value: string) => {
     setFeedbackMessage(null);
@@ -44,6 +70,22 @@ export const useLoginScreen = () => {
       ...current,
       password: value,
     }));
+  };
+
+  const toggleRememberMe = () => {
+    setFeedbackMessage(null);
+    setSubmitState('idle');
+
+    setRememberMe(current => {
+      const nextValue = !current;
+
+      if (!nextValue) {
+        authSessionStorageService.clear();
+        rememberedCredentialsService.clear();
+      }
+
+      return nextValue;
+    });
   };
 
   const submit = async (): Promise<AuthSession | null> => {
@@ -70,15 +112,26 @@ export const useLoginScreen = () => {
     }
 
     setSubmitState('success');
+
+    if (rememberMe) {
+      await rememberedCredentialsService.save(formValues);
+      await authSessionStorageService.save(response.data);
+    } else {
+      await rememberedCredentialsService.clear();
+      await authSessionStorageService.clear();
+    }
+
     return response.data;
   };
 
   return {
     feedbackMessage,
     formValues,
+    rememberMe,
     setEmail,
     setPassword,
     submit,
     submitState,
+    toggleRememberMe,
   };
 };

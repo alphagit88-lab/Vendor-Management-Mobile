@@ -3,6 +3,7 @@ import {
   Image,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -33,10 +34,12 @@ export const LoginScreen = ({onAuthenticated}: LoginScreenProps) => {
   const {
     feedbackMessage,
     formValues,
+    rememberMe,
     setEmail,
     setPassword,
     submit,
     submitState,
+    toggleRememberMe,
   } = useLoginScreen();
 
   const handleLogin = async () => {
@@ -111,6 +114,26 @@ export const LoginScreen = ({onAuthenticated}: LoginScreenProps) => {
                   value={formValues.password}
                 />
 
+                <Pressable
+                  accessibilityRole="checkbox"
+                  accessibilityState={{checked: rememberMe}}
+                  onPress={toggleRememberMe}
+                  style={({pressed}) => [
+                    styles.rememberMeRow,
+                    pressed ? styles.rememberMeRowPressed : null,
+                  ]}>
+                  <View
+                    style={[
+                      styles.checkbox,
+                      rememberMe ? styles.checkboxChecked : null,
+                    ]}>
+                    {rememberMe ? (
+                      <View style={styles.checkboxIndicator} />
+                    ) : null}
+                  </View>
+                  <Text style={styles.rememberMeLabel}>Remember me</Text>
+                </Pressable>
+
                 <PrimaryButton
                   loading={submitState === 'loading'}
                   onPress={handleLogin}
@@ -173,6 +196,26 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 1,
   },
+  checkbox: {
+    alignItems: 'center',
+    backgroundColor: palette.surfaceMuted,
+    borderColor: palette.borderStrong,
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 22,
+    justifyContent: 'center',
+    width: 22,
+  },
+  checkboxChecked: {
+    backgroundColor: palette.primarySoft,
+    borderColor: palette.primaryStrong,
+  },
+  checkboxIndicator: {
+    backgroundColor: palette.primaryStrong,
+    borderRadius: 999,
+    height: 10,
+    width: 10,
+  },
   canvas: {
     flex: 1,
     justifyContent: 'center',
@@ -229,6 +272,21 @@ const styles = StyleSheet.create({
   safeArea: {
     backgroundColor: palette.background,
     flex: 1,
+  },
+  rememberMeLabel: {
+    color: palette.textSecondary,
+    fontSize: 14,
+    fontWeight: '700',
+    marginLeft: spacing.sm,
+  },
+  rememberMeRow: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    marginBottom: spacing.lg,
+  },
+  rememberMeRowPressed: {
+    opacity: 0.8,
   },
   scrollContent: {
     flexGrow: 1,
