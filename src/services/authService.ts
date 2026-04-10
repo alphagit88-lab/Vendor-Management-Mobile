@@ -4,9 +4,9 @@ import {
   LoginRequest,
   ServiceResult,
 } from '../types/auth';
+import {buildApiUrl} from '../constants/api';
 
-const LOGIN_ENDPOINT =
-  'https://vendor-management-backend.vercel.app/api/auth/login';
+const LOGIN_ENDPOINT = buildApiUrl('auth/login');
 
 interface LoginApiResponse {
   success?: boolean;

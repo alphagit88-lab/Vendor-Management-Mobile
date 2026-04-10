@@ -3,6 +3,8 @@ export interface Customer {
   name: string;
   address: string;
   phone: string;
+  latitude: number | null;
+  longitude: number | null;
   created_at: string;
   updated_at: string;
   account_id: string;

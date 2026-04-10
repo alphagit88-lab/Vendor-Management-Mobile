@@ -1,4 +1,5 @@
 import {ServiceResult} from '../types/auth';
+import {API_BASE_URL} from '../constants/api';
 import {
   Category,
   CreateOrderRequest,
@@ -6,8 +7,6 @@ import {
   Customer,
   InventoryItem,
 } from '../types/order';
-
-const API_BASE_URL = 'https://vendor-management-backend.vercel.app/api';
 
 interface CollectionResponse<T> {
   success?: boolean;

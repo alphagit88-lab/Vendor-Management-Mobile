@@ -1,8 +1,14 @@
-import React, {useState} from 'react';
+import React, {useEffect, useState} from 'react';
+import Geolocation, {
+  GeolocationError,
+  GeolocationResponse,
+} from '@react-native-community/geolocation';
 import {
   ActivityIndicator,
   Image,
   Modal,
+  PermissionsAndroid,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -33,6 +39,7 @@ type HomeView = 'home' | 'customers' | 'products';
 type LoadStatus = 'idle' | ContentLoadState;
 type CheckoutState = 'idle' | 'loading';
 type FeedbackTone = 'error' | 'info' | 'success';
+type DeviceLocationStatus = 'idle' | 'loading' | 'ready' | 'denied' | 'error';
 
 interface HomeScreenProps {
   onSignOut: () => void;
@@ -43,6 +50,21 @@ interface CheckoutFeedback {
   message: string;
   tone: FeedbackTone;
 }
+
+interface DeviceLocation {
+  latitude: number;
+  longitude: number;
+}
+
+interface DistanceSignal {
+  glowColor: string;
+  label: string;
+  lightColor: string;
+}
+
+const EARTH_RADIUS_KILOMETERS = 6371.0088;
+const CLOSE_DISTANCE_KILOMETERS = 16;
+const MEDIUM_DISTANCE_KILOMETERS = 40;
 
 const formatCurrency = (value: number) =>
   `$${value.toLocaleString('en-US', {
@@ -60,6 +82,103 @@ const getProductCategoryValue = (value: string) =>
   getProductCategoryLabel(value).toLowerCase();
 
 const getCustomerAddress = (value: string) => value.replace(/\s*\n\s*/g, '\n');
+const hasValidCoordinate = (
+  value: number | null | undefined,
+): value is number => typeof value === 'number' && Number.isFinite(value);
+const toRadians = (value: number) => (value * Math.PI) / 180;
+const formatCoordinate = (value: number) =>
+  value.toLocaleString('en-US', {
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 4,
+  });
+const formatDistanceKilometers = (value: number) =>
+  `${value.toLocaleString('en-US', {
+    minimumFractionDigits: value < 10 ? 1 : 0,
+    maximumFractionDigits: value < 10 ? 1 : 0,
+  })} km away`;
+const getLocationErrorMessage = (error: unknown) => {
+  if (!error || typeof error !== 'object') {
+    return 'We could not determine your current location. Showing customers without distance sorting.';
+  }
+
+  const locationError = error as GeolocationError;
+
+  if (locationError.code === locationError.PERMISSION_DENIED) {
+    return 'Location access was denied. Showing customers without distance sorting.';
+  }
+
+  if (locationError.code === locationError.TIMEOUT) {
+    return 'Location lookup timed out. Try refreshing your current location.';
+  }
+
+  if (locationError.code === locationError.POSITION_UNAVAILABLE) {
+    return 'Current location is unavailable right now. Try again in a moment.';
+  }
+
+  if (typeof locationError.message === 'string' && locationError.message) {
+    return locationError.message;
+  }
+
+  return 'We could not determine your current location. Showing customers without distance sorting.';
+};
+const getCustomerDistanceKilometers = (
+  customer: Customer,
+  currentLocation: DeviceLocation | null,
+) => {
+  if (
+    !currentLocation ||
+    !hasValidCoordinate(customer.latitude) ||
+    !hasValidCoordinate(customer.longitude)
+  ) {
+    return null;
+  }
+
+  const latitudeDistance = toRadians(
+    customer.latitude - currentLocation.latitude,
+  );
+  const longitudeDistance = toRadians(
+    customer.longitude - currentLocation.longitude,
+  );
+  const currentLatitude = toRadians(currentLocation.latitude);
+  const customerLatitude = toRadians(customer.latitude);
+  const haversineComponent =
+    Math.sin(latitudeDistance / 2) * Math.sin(latitudeDistance / 2) +
+    Math.cos(currentLatitude) *
+      Math.cos(customerLatitude) *
+      Math.sin(longitudeDistance / 2) *
+      Math.sin(longitudeDistance / 2);
+  const arcDistance =
+    2 *
+    Math.atan2(
+      Math.sqrt(haversineComponent),
+      Math.sqrt(1 - haversineComponent),
+    );
+
+  return EARTH_RADIUS_KILOMETERS * arcDistance;
+};
+const getDistanceSignal = (distanceKilometers: number): DistanceSignal => {
+  if (distanceKilometers <= CLOSE_DISTANCE_KILOMETERS) {
+    return {
+      glowColor: 'rgba(67, 193, 96, 0.28)',
+      label: 'Close',
+      lightColor: '#43C160',
+    };
+  }
+
+  if (distanceKilometers <= MEDIUM_DISTANCE_KILOMETERS) {
+    return {
+      glowColor: 'rgba(233, 190, 71, 0.30)',
+      label: 'Medium',
+      lightColor: '#E9BE47',
+    };
+  }
+
+  return {
+    glowColor: 'rgba(225, 91, 100, 0.28)',
+    label: 'Far',
+    lightColor: '#E15B64',
+  };
+};
 
 const getInitials = (value: string) => {
   const initials = normalizeText(value)
@@ -122,6 +241,12 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [customersStatus, setCustomersStatus] = useState<LoadStatus>('idle');
   const [customersError, setCustomersError] = useState<string | null>(null);
+  const [currentLocation, setCurrentLocation] = useState<DeviceLocation | null>(
+    null,
+  );
+  const [locationStatus, setLocationStatus] =
+    useState<DeviceLocationStatus>('idle');
+  const [locationError, setLocationError] = useState<string | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(
     null,
   );
@@ -230,6 +355,47 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
       normalizedProductSku.includes(normalizedProductSearchQuery)
     );
   });
+  const sortedCustomers = customers
+    .map((customer, index) => ({
+      customer,
+      distanceFromDevice: getCustomerDistanceKilometers(
+        customer,
+        currentLocation,
+      ),
+      index,
+    }))
+    .sort((firstCustomer, secondCustomer) => {
+      if (
+        firstCustomer.distanceFromDevice === null &&
+        secondCustomer.distanceFromDevice === null
+      ) {
+        return firstCustomer.index - secondCustomer.index;
+      }
+
+      if (firstCustomer.distanceFromDevice === null) {
+        return 1;
+      }
+
+      if (secondCustomer.distanceFromDevice === null) {
+        return -1;
+      }
+
+      if (
+        firstCustomer.distanceFromDevice !== secondCustomer.distanceFromDevice
+      ) {
+        return (
+          firstCustomer.distanceFromDevice - secondCustomer.distanceFromDevice
+        );
+      }
+
+      return firstCustomer.index - secondCustomer.index;
+    });
+  const nearestCustomerId =
+    locationStatus === 'ready'
+      ? sortedCustomers.find(
+          sortedCustomer => sortedCustomer.distanceFromDevice !== null,
+        )?.customer.id ?? null
+      : null;
 
   const selectedProducts = products.filter(
     product => (selectedQuantities[product.id] ?? 0) > 0,
@@ -307,6 +473,67 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
       setCustomQuantityError(null);
     }
   };
+
+  const loadCurrentLocation = async () => {
+    setLocationStatus('loading');
+    setLocationError(null);
+    setCurrentLocation(null);
+
+    try {
+      if (Platform.OS === 'android') {
+        const permissionResult = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          {
+            title: 'Share current location',
+            message:
+              'We use your current location to sort customers from nearest to farthest.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Not now',
+          },
+        );
+
+        if (permissionResult !== PermissionsAndroid.RESULTS.GRANTED) {
+          setLocationStatus('denied');
+          setLocationError(
+            permissionResult === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN
+              ? 'Location permission is turned off for this app. Enable it to sort customers from nearest to farthest.'
+              : 'Location access was denied. Showing customers without distance sorting.',
+          );
+          return;
+        }
+      }
+
+      Geolocation.setRNConfiguration({
+        skipPermissionRequests: Platform.OS === 'android',
+        authorizationLevel: 'whenInUse',
+        locationProvider: 'auto',
+      });
+
+      const position = await new Promise<GeolocationResponse>(
+        (resolve, reject) => {
+          Geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: true,
+            maximumAge: 60000,
+            timeout: 15000,
+          });
+        },
+      );
+
+      setCurrentLocation({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+      });
+      setLocationStatus('ready');
+    } catch (error) {
+      setCurrentLocation(null);
+      setLocationStatus('error');
+      setLocationError(getLocationErrorMessage(error));
+    }
+  };
+
+  useEffect(() => {
+    loadCurrentLocation();
+  }, []);
 
   const loadCustomers = async () => {
     setCustomersStatus('loading');
@@ -614,6 +841,58 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
           </View>
         </View>
 
+        {locationStatus === 'loading' ? (
+          <InlineMessage
+            message="Finding your current location so customers can be sorted from nearest to farthest."
+            tone="info"
+          />
+        ) : null}
+
+        {locationStatus === 'ready' && currentLocation ? (
+          <View style={styles.locationCard}>
+            <View style={styles.locationCardText}>
+              <Text style={styles.locationCardTitle}>
+                Current location ready
+              </Text>
+              <Text style={styles.locationCardBody}>
+                {formatCoordinate(currentLocation.latitude)},{' '}
+                {formatCoordinate(currentLocation.longitude)}. Customers are
+                sorted nearest to farthest.
+              </Text>
+            </View>
+            <Pressable
+              onPress={loadCurrentLocation}
+              style={({pressed}) => [
+                styles.locationActionButton,
+                pressed ? styles.locationActionButtonPressed : null,
+              ]}>
+              <Text style={styles.locationActionButtonLabel}>Refresh</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
+        {locationStatus !== 'idle' &&
+        locationStatus !== 'loading' &&
+        locationStatus !== 'ready' ? (
+          <View style={styles.locationCard}>
+            <View style={styles.locationCardText}>
+              <Text style={styles.locationCardTitle}>Location unavailable</Text>
+              <Text style={styles.locationCardBody}>
+                {locationError ??
+                  'Showing customers without distance sorting until location is available.'}
+              </Text>
+            </View>
+            <Pressable
+              onPress={loadCurrentLocation}
+              style={({pressed}) => [
+                styles.locationActionButton,
+                pressed ? styles.locationActionButtonPressed : null,
+              ]}>
+              <Text style={styles.locationActionButtonLabel}>Retry</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         {customersError ? (
           <InlineMessage message={customersError} tone="error" />
         ) : null}
@@ -648,70 +927,132 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
         {customersStatus === 'ready' ? (
           <View style={styles.cardStack}>
-            {customers.map(customer => (
-              <Pressable
-                key={customer.id}
-                onPress={() => selectCustomer(customer)}
-                style={({pressed}) => [
-                  styles.customerCard,
-                  pressed ? styles.customerCardPressed : null,
-                ]}>
-                <View style={styles.customerCardHeader}>
-                  <View style={styles.customerIdentity}>
-                    <View style={styles.customerAvatar}>
-                      <Text style={styles.customerAvatarLabel}>
-                        {getInitials(customer.name)}
+            {sortedCustomers.map(({customer, distanceFromDevice}) => {
+              const distanceSignal =
+                distanceFromDevice !== null
+                  ? getDistanceSignal(distanceFromDevice)
+                  : null;
+              const isNearestCustomer =
+                nearestCustomerId !== null && customer.id === nearestCustomerId;
+
+              return (
+                <Pressable
+                  key={customer.id}
+                  onPress={() => selectCustomer(customer)}
+                  style={({pressed}) => [
+                    styles.customerCard,
+                    pressed ? styles.customerCardPressed : null,
+                  ]}>
+                  <View style={styles.customerCardHeader}>
+                    <View style={styles.customerIdentity}>
+                      <View style={styles.customerAvatar}>
+                        <Text style={styles.customerAvatarLabel}>
+                          {getInitials(customer.name)}
+                        </Text>
+                      </View>
+                      <View style={styles.customerIdentityText}>
+                        <Text style={styles.customerMiniLabel}>Customer</Text>
+                        <Text style={styles.customerAccountText}>
+                          {customer.account_id || 'No account id'}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.customerHeaderBadges}>
+                      {locationStatus === 'ready' && distanceSignal ? (
+                        <View
+                          accessibilityLabel={`${distanceSignal.label} distance`}
+                          style={[
+                            styles.distanceLightBadge,
+                            {
+                              backgroundColor: distanceSignal.glowColor,
+                              borderColor: distanceSignal.lightColor,
+                            },
+                          ]}>
+                          <View
+                            style={[
+                              styles.distanceLight,
+                              {
+                                backgroundColor: distanceSignal.lightColor,
+                                shadowColor: distanceSignal.lightColor,
+                              },
+                            ]}
+                          />
+                        </View>
+                      ) : null}
+
+                      <View style={styles.paymentPill}>
+                        <Text style={styles.paymentPillLabel}>
+                          {customer.payment_type || 'Payment'}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+
+                  <Text numberOfLines={2} style={styles.customerName}>
+                    {normalizeText(customer.name)}
+                  </Text>
+                  <Text
+                    numberOfLines={2}
+                    style={[
+                      styles.customerCompany,
+                      isNearestCustomer ? styles.customerCompanyNearest : null,
+                    ]}>
+                    {normalizeText(
+                      customer.registered_company_name || customer.name,
+                    )}
+                  </Text>
+
+                  {isNearestCustomer ? (
+                    <View style={styles.nearestCustomerBadge}>
+                      <Text style={styles.nearestCustomerBadgeLabel}>
+                        Most Near By
                       </Text>
                     </View>
-                    <View style={styles.customerIdentityText}>
-                      <Text style={styles.customerMiniLabel}>Customer</Text>
-                      <Text style={styles.customerAccountText}>
-                        {customer.account_id || 'No account id'}
+                  ) : null}
+
+                  <View style={styles.customerMetaGroup}>
+                    <View style={styles.customerMetaRow}>
+                      <Text style={styles.customerMetaIcon}>Phone</Text>
+                      <Text style={styles.customerMetaValue}>
+                        {customer.phone || 'No phone'}
+                      </Text>
+                    </View>
+                    {locationStatus === 'ready' ? (
+                      <View style={styles.customerMetaRow}>
+                        <Text style={styles.customerMetaIcon}>Distance</Text>
+                        <Text style={styles.customerMetaValue}>
+                          {distanceFromDevice !== null
+                            ? `${formatDistanceKilometers(distanceFromDevice)}${
+                                distanceSignal
+                                  ? ` | ${distanceSignal.label}`
+                                  : ''
+                              }`
+                            : 'No customer coordinates'}
+                        </Text>
+                      </View>
+                    ) : null}
+                    <View style={styles.customerMetaRow}>
+                      <Text style={styles.customerMetaIcon}>Address</Text>
+                      <Text numberOfLines={3} style={styles.customerMetaValue}>
+                        {getCustomerAddress(customer.address)}
                       </Text>
                     </View>
                   </View>
 
-                  <View style={styles.paymentPill}>
-                    <Text style={styles.paymentPillLabel}>
-                      {customer.payment_type || 'Payment'}
+                  <View style={styles.customerFooter}>
+                    <View style={styles.accountPill}>
+                      <Text style={styles.accountPillLabel}>
+                        Account {customer.account_id || 'N/A'}
+                      </Text>
+                    </View>
+                    <Text style={styles.customerActionLabel}>
+                      View Products
                     </Text>
                   </View>
-                </View>
-
-                <Text numberOfLines={2} style={styles.customerName}>
-                  {normalizeText(customer.name)}
-                </Text>
-                <Text numberOfLines={2} style={styles.customerCompany}>
-                  {normalizeText(
-                    customer.registered_company_name || customer.name,
-                  )}
-                </Text>
-
-                <View style={styles.customerMetaGroup}>
-                  <View style={styles.customerMetaRow}>
-                    <Text style={styles.customerMetaIcon}>Phone</Text>
-                    <Text style={styles.customerMetaValue}>
-                      {customer.phone || 'No phone'}
-                    </Text>
-                  </View>
-                  <View style={styles.customerMetaRow}>
-                    <Text style={styles.customerMetaIcon}>Address</Text>
-                    <Text numberOfLines={3} style={styles.customerMetaValue}>
-                      {getCustomerAddress(customer.address)}
-                    </Text>
-                  </View>
-                </View>
-
-                <View style={styles.customerFooter}>
-                  <View style={styles.accountPill}>
-                    <Text style={styles.accountPillLabel}>
-                      Account {customer.account_id || 'N/A'}
-                    </Text>
-                  </View>
-                  <Text style={styles.customerActionLabel}>View Products</Text>
-                </View>
-              </Pressable>
-            ))}
+                </Pressable>
+              );
+            })}
           </View>
         ) : null}
       </View>
@@ -953,26 +1294,6 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
                         <View style={styles.productCardActions}>
                           <Pressable
-                            disabled={remainingQuantity === 0}
-                            onPress={event => {
-                              event.stopPropagation();
-                              updateQuantity(product, 1);
-                            }}
-                            style={({pressed}) => [
-                              styles.productStepButton,
-                              remainingQuantity === 0
-                                ? styles.productStepButtonDisabled
-                                : null,
-                              pressed && remainingQuantity > 0
-                                ? styles.productStepButtonPressed
-                                : null,
-                            ]}>
-                            <Text style={styles.productStepButtonLabel}>
-                              +1
-                            </Text>
-                          </Pressable>
-
-                          <Pressable
                             disabled={quantity === 0}
                             onPress={event => {
                               event.stopPropagation();
@@ -989,6 +1310,26 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                             ]}>
                             <Text style={styles.productStepButtonLabel}>
                               -1
+                            </Text>
+                          </Pressable>
+
+                          <Pressable
+                            disabled={remainingQuantity === 0}
+                            onPress={event => {
+                              event.stopPropagation();
+                              updateQuantity(product, 1);
+                            }}
+                            style={({pressed}) => [
+                              styles.productStepButton,
+                              remainingQuantity === 0
+                                ? styles.productStepButtonDisabled
+                                : null,
+                              pressed && remainingQuantity > 0
+                                ? styles.productStepButtonPressed
+                                : null,
+                            ]}>
+                            <Text style={styles.productStepButtonLabel}>
+                              +1
                             </Text>
                           </Pressable>
 
@@ -1645,12 +1986,21 @@ const styles = StyleSheet.create({
   customerCardPressed: {
     opacity: 0.96,
   },
+  customerHeaderBadges: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginLeft: spacing.sm,
+  },
   customerCompany: {
     color: ui.textMuted,
     fontSize: 15,
     fontWeight: '700',
     lineHeight: 22,
     marginBottom: spacing.lg,
+  },
+  customerCompanyNearest: {
+    marginBottom: spacing.sm,
   },
   customerFooter: {
     alignItems: 'center',
@@ -1750,6 +2100,41 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     lineHeight: 21,
   },
+  nearestCustomerBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: ui.highlightSoft,
+    borderColor: ui.cardBorderStrong,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    marginBottom: spacing.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  nearestCustomerBadgeLabel: {
+    color: ui.accentStrong,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  distanceLight: {
+    borderRadius: radii.pill,
+    height: 12,
+    width: 12,
+    elevation: 4,
+    shadowOffset: {width: 0, height: 0},
+    shadowOpacity: 0.75,
+    shadowRadius: 8,
+  },
+  distanceLightBadge: {
+    alignItems: 'center',
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorderStrong,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    height: 32,
+    justifyContent: 'center',
+    width: 32,
+  },
   customerMiniLabel: {
     color: ui.textMuted,
     fontSize: 11,
@@ -1822,6 +2207,55 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '900',
     letterSpacing: 0.5,
+  },
+  locationActionButton: {
+    alignItems: 'center',
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorderStrong,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 40,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  locationActionButtonLabel: {
+    color: ui.accentStrong,
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  locationActionButtonPressed: {
+    opacity: 0.92,
+  },
+  locationCard: {
+    alignItems: 'center',
+    backgroundColor: ui.highlightSoft,
+    borderColor: ui.cardBorderStrong,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    marginBottom: spacing.lg,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  locationCardBody: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  locationCardText: {
+    flex: 1,
+    minWidth: 180,
+  },
+  locationCardTitle: {
+    color: ui.textHeading,
+    fontSize: 15,
+    fontWeight: '900',
+    marginBottom: spacing.xxs,
   },
   metaTag: {
     backgroundColor: palette.white,
