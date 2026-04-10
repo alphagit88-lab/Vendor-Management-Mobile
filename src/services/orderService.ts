@@ -3,9 +3,11 @@ import {API_BASE_URL} from '../constants/api';
 import {
   Category,
   CreateOrderRequest,
+  CreatedOrderResult,
   CreatedOrder,
   Customer,
   InventoryItem,
+  StoredOrderBill,
 } from '../types/order';
 
 interface CollectionResponse<T> {
@@ -17,6 +19,14 @@ interface CollectionResponse<T> {
 interface EntityResponse<T> {
   success?: boolean;
   data?: T;
+  message?: string;
+}
+
+interface CreateOrderResponse {
+  success?: boolean;
+  data?: CreatedOrder;
+  bill?: StoredOrderBill;
+  bill_generation_error?: string;
   message?: string;
 }
 
@@ -80,50 +90,94 @@ const getCollection = async <T>(
   }
 };
 
-const postEntity = async <T>(
-  endpoint: string,
-  token: string,
-  body: Record<string, string | number | boolean | null>,
-): Promise<ServiceResult<T>> => {
-  try {
-    const response = await fetch(`${API_BASE_URL}/${endpoint}`, {
-      method: 'POST',
-      headers: getHeaders(token, true),
-      body: JSON.stringify(body),
-    });
+export const orderService = {
+  async createOrder(
+    token: string,
+    request: CreateOrderRequest,
+  ): Promise<ServiceResult<CreatedOrderResult>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/orders`, {
+        method: 'POST',
+        headers: getHeaders(token, true),
+        body: JSON.stringify({
+          customer_id: request.customerId,
+          items: request.items.map(item => ({
+            item_id: item.itemId,
+            price: item.unitPrice,
+            quantity: item.quantity,
+            subtotal: item.subtotal,
+            unit_deposit: item.unitDeposit,
+            unit_discount: item.unitDiscount,
+            unit_price: item.unitPrice,
+          })),
+          load_number: request.loadNumber,
+          notes: request.notes,
+          total_amount: request.totalAmount,
+          total_credits: request.totalCredits,
+          total_deposit: request.totalDeposit,
+        }),
+      });
 
-    const payload = await readJsonResponse<EntityResponse<T>>(response);
+      const payload = await readJsonResponse<CreateOrderResponse>(response);
 
-    if (!response.ok || !payload?.success || !payload.data) {
+      if (!response.ok || !payload?.success || !payload.data) {
+        return {
+          ok: false,
+          message:
+            payload?.message ??
+            `Request failed with status ${response.status}.`,
+        };
+      }
+
+      return {
+        ok: true,
+        data: {
+          bill: payload.bill,
+          billGenerationError: payload.bill_generation_error,
+          order: payload.data,
+        },
+      };
+    } catch (error) {
       return {
         ok: false,
-        message:
-          payload?.message ?? `Request failed with status ${response.status}.`,
+        message: getErrorMessage(error),
       };
     }
+  },
 
-    return {
-      ok: true,
-      data: payload.data,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      message: getErrorMessage(error),
-    };
-  }
-};
+  async getOrderBill(
+    token: string,
+    orderId: number,
+  ): Promise<ServiceResult<StoredOrderBill>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/orders/${orderId}/bill`, {
+        method: 'GET',
+        headers: getHeaders(token),
+      });
 
-export const orderService = {
-  createOrder(token: string, request: CreateOrderRequest) {
-    return postEntity<CreatedOrder>('orders', token, {
-      customer_id: request.customerId,
-      load_number: request.loadNumber,
-      notes: request.notes,
-      total_amount: request.totalAmount,
-      total_credits: request.totalCredits,
-      total_deposit: request.totalDeposit,
-    });
+      const payload = await readJsonResponse<EntityResponse<StoredOrderBill>>(
+        response,
+      );
+
+      if (!response.ok || !payload?.success || !payload.data) {
+        return {
+          ok: false,
+          message:
+            payload?.message ??
+            `Request failed with status ${response.status}.`,
+        };
+      }
+
+      return {
+        ok: true,
+        data: payload.data,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: getErrorMessage(error),
+      };
+    }
   },
 
   getCustomers(token: string) {

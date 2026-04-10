@@ -21,6 +21,7 @@ import {
 import {InlineMessage} from '../components/common/InlineMessage';
 import {ScreenContainer} from '../components/common/ScreenContainer';
 import {StatePanel} from '../components/common/StatePanel';
+import {buildBackendUrl} from '../constants/api';
 import {orderService} from '../services/orderService';
 import {pdfService} from '../services/pdfService';
 import {palette} from '../theme/colors';
@@ -33,13 +34,19 @@ import {
 import {radii, shadowPresets} from '../theme/shape';
 import {spacing} from '../theme/spacing';
 import {AuthSession, ContentLoadState} from '../types/auth';
-import {Category, Customer, PersonalInventoryItem} from '../types/order';
+import {
+  Category,
+  Customer,
+  PersonalInventoryItem,
+  StoredOrderBill,
+} from '../types/order';
 
 type HomeView = 'home' | 'customers' | 'products';
 type LoadStatus = 'idle' | ContentLoadState;
 type CheckoutState = 'idle' | 'loading';
 type FeedbackTone = 'error' | 'info' | 'success';
 type DeviceLocationStatus = 'idle' | 'loading' | 'ready' | 'denied' | 'error';
+type ReceiptActionState = 'idle' | 'opening' | 'printing';
 
 interface HomeScreenProps {
   onSignOut: () => void;
@@ -65,6 +72,7 @@ interface DistanceSignal {
 const EARTH_RADIUS_KILOMETERS = 6371.0088;
 const CLOSE_DISTANCE_KILOMETERS = 16;
 const MEDIUM_DISTANCE_KILOMETERS = 40;
+const MAX_ORDER_QUANTITY_PER_ITEM = 10;
 
 const formatCurrency = (value: number) =>
   `$${value.toLocaleString('en-US', {
@@ -74,7 +82,6 @@ const formatCurrency = (value: number) =>
 
 const normalizeText = (value: string) => value.replace(/\s+/g, ' ').trim();
 
-const getProductName = (value: string) => normalizeText(value).toUpperCase();
 const ALL_PRODUCT_CATEGORY = 'all-categories';
 const getProductCategoryLabel = (value: string) =>
   normalizeText(value) || 'Uncategorized';
@@ -96,6 +103,20 @@ const formatDistanceKilometers = (value: number) =>
     minimumFractionDigits: value < 10 ? 1 : 0,
     maximumFractionDigits: value < 10 ? 1 : 0,
   })} km away`;
+const formatReceiptTimestamp = (value: string) => {
+  const timestamp = new Date(value);
+
+  if (Number.isNaN(timestamp.getTime())) {
+    return 'Stored receipt ready';
+  }
+
+  return `Stored ${timestamp.toLocaleString('en-US', {
+    day: '2-digit',
+    hour: 'numeric',
+    minute: '2-digit',
+    month: 'short',
+  })}`;
+};
 const getLocationErrorMessage = (error: unknown) => {
   if (!error || typeof error !== 'object') {
     return 'We could not determine your current location. Showing customers without distance sorting.';
@@ -156,6 +177,8 @@ const getCustomerDistanceKilometers = (
 
   return EARTH_RADIUS_KILOMETERS * arcDistance;
 };
+const getMaxOrderableQuantity = (heldQuantity: number) =>
+  Math.min(heldQuantity, MAX_ORDER_QUANTITY_PER_ITEM);
 const getDistanceSignal = (distanceKilometers: number): DistanceSignal => {
   if (distanceKilometers <= CLOSE_DISTANCE_KILOMETERS) {
     return {
@@ -278,6 +301,10 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
   );
   const [checkoutFeedback, setCheckoutFeedback] =
     useState<CheckoutFeedback | null>(null);
+  const [latestStoredBill, setLatestStoredBill] =
+    useState<StoredOrderBill | null>(null);
+  const [receiptActionState, setReceiptActionState] =
+    useState<ReceiptActionState>('idle');
 
   const contentWidth = getContentWidth(width);
   const horizontalPadding = getHorizontalPadding(width);
@@ -414,6 +441,8 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
   const totalPayable = itemSubtotal - creditMemoAmount + containerDepositAmount;
   const generateBillDisabled =
     !selectedProducts.length || checkoutState === 'loading' || totalPayable < 0;
+  const receiptActionDisabled =
+    !latestStoredBill || receiptActionState !== 'idle';
   const selectedItemsLabel =
     selectedProducts.length === 1
       ? '1 item selected'
@@ -432,7 +461,8 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     : 0;
   const quantityModalBaseRemainingQuantity = quantityModalProduct
     ? Math.max(
-        quantityModalProduct.heldQuantity - quantityModalCurrentQuantity,
+        getMaxOrderableQuantity(quantityModalProduct.heldQuantity) -
+          quantityModalCurrentQuantity,
         0,
       )
     : 0;
@@ -448,6 +478,8 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     setContainerDepositInput('0');
     setCheckoutFeedback(null);
     setCheckoutState('idle');
+    setLatestStoredBill(null);
+    setReceiptActionState('idle');
   };
 
   const closeCategoryDropdown = () => {
@@ -642,9 +674,12 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
   const updateQuantity = (product: PersonalInventoryItem, delta: number) => {
     setCheckoutFeedback(null);
     setSelectedQuantities(current => {
+      const maxOrderableQuantity = getMaxOrderableQuantity(
+        product.heldQuantity,
+      );
       const nextQuantity = Math.max(
         0,
-        Math.min(product.heldQuantity, (current[product.id] ?? 0) + delta),
+        Math.min(maxOrderableQuantity, (current[product.id] ?? 0) + delta),
       );
 
       if (nextQuantity === 0) {
@@ -666,7 +701,9 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     }
 
     if (quantityModalBaseRemainingQuantity <= 0) {
-      setCustomQuantityError('No remaining stock is available for this item.');
+      setCustomQuantityError(
+        `This item already reached the ${MAX_ORDER_QUANTITY_PER_ITEM} unit order limit.`,
+      );
       return;
     }
 
@@ -713,6 +750,67 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     setContainerDepositInput(sanitizeCurrencyInput(value));
   };
 
+  const openStoredReceipt = async () => {
+    if (!latestStoredBill) {
+      return;
+    }
+
+    setReceiptActionState('opening');
+
+    const response = await pdfService.openStoredBill({
+      fileName: latestStoredBill.file_name,
+      token: session.token,
+      url: buildBackendUrl(latestStoredBill.bill_link),
+    });
+
+    setReceiptActionState('idle');
+
+    if (!response.ok || !response.data) {
+      setCheckoutFeedback({
+        message: response.message ?? 'Unable to open the stored receipt.',
+        tone: 'error',
+      });
+      return;
+    }
+
+    setCheckoutFeedback({
+      message: response.data.opened
+        ? `Receipt ${latestStoredBill.order_number} opened.`
+        : `Receipt ${latestStoredBill.order_number} downloaded. Open it from your device if it did not appear automatically.`,
+      tone: 'success',
+    });
+  };
+
+  const printStoredReceipt = async () => {
+    if (!latestStoredBill) {
+      return;
+    }
+
+    setReceiptActionState('printing');
+
+    const response = await pdfService.printStoredBill({
+      fileName: latestStoredBill.file_name,
+      jobName: `Receipt ${latestStoredBill.order_number}`,
+      token: session.token,
+      url: buildBackendUrl(latestStoredBill.bill_link),
+    });
+
+    setReceiptActionState('idle');
+
+    if (!response.ok || !response.data) {
+      setCheckoutFeedback({
+        message: response.message ?? 'Unable to print the stored receipt.',
+        tone: 'error',
+      });
+      return;
+    }
+
+    setCheckoutFeedback({
+      message: `Print dialog opened for receipt ${latestStoredBill.order_number}.`,
+      tone: 'success',
+    });
+  };
+
   const handleGenerateBill = async () => {
     if (!selectedCustomer || !selectedProducts.length) {
       return;
@@ -728,12 +826,27 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
     setCheckoutState('loading');
     setCheckoutFeedback(null);
+    setLatestStoredBill(null);
+    setReceiptActionState('idle');
 
     const orderResponse = await orderService.createOrder(session.token, {
       customerId: selectedCustomer.id,
+      items: selectedProducts.map(product => {
+        const quantity = selectedQuantities[product.id] ?? 0;
+        const subtotal = quantity * product.unitPrice;
+
+        return {
+          itemId: product.id,
+          quantity,
+          subtotal: subtotal.toFixed(2),
+          unitDeposit: '0.00',
+          unitDiscount: '0.00',
+          unitPrice: product.unitPrice.toFixed(2),
+        };
+      }),
       loadNumber: 'POS',
       notes: `POS Sale to ${selectedCustomer.name}`,
-      totalAmount: totalPayable.toFixed(2),
+      totalAmount: itemSubtotal.toFixed(2),
       totalCredits: creditMemoAmount.toFixed(2),
       totalDeposit: containerDepositAmount.toFixed(2),
     });
@@ -747,52 +860,40 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
       return;
     }
 
-    const pdfResponse = await pdfService.generateOrderBill({
-      createdAt: orderResponse.data.created_at,
-      customerAccountId: selectedCustomer.account_id || 'N/A',
-      customerAddress: getCustomerAddress(selectedCustomer.address),
-      customerName: selectedCustomer.name,
-      customerPhone: selectedCustomer.phone,
-      items: selectedProducts.map(product => {
-        const quantity = selectedQuantities[product.id] ?? 0;
+    let storedBill = orderResponse.data.bill ?? null;
 
-        return {
-          itemNumber: product.item_number,
-          lineTotal: quantity * product.unitPrice,
-          name: getProductName(product.item_name),
-          quantity,
-          unitPrice: product.unitPrice,
-        };
-      }),
-      notes: `POS Sale to ${selectedCustomer.name}`,
-      orderNumber: orderResponse.data.order_number,
-      salespersonName: session.user.name,
-      totalAmount: totalPayable,
-      totalCredits: creditMemoAmount,
-      totalDeposit: containerDepositAmount,
-    });
+    if (!storedBill) {
+      const billResponse = await orderService.getOrderBill(
+        session.token,
+        orderResponse.data.order.id,
+      );
+
+      if (billResponse.ok && billResponse.data) {
+        storedBill = billResponse.data;
+      }
+    }
 
     setCheckoutState('idle');
+    setSelectedQuantities({});
+    setCreditMemoInput('0');
+    setContainerDepositInput('0');
+    setIsSummaryVisible(false);
+    setLatestStoredBill(storedBill);
 
-    if (!pdfResponse.ok || !pdfResponse.data) {
+    if (!storedBill) {
       setCheckoutFeedback({
         message: `Order ${
-          orderResponse.data.order_number
-        } saved, but the PDF bill could not be downloaded. ${
-          pdfResponse.message ?? ''
+          orderResponse.data.order.order_number
+        } saved, but the stored receipt is not ready yet. ${
+          orderResponse.data.billGenerationError ?? ''
         }`.trim(),
         tone: 'info',
       });
       return;
     }
 
-    setSelectedQuantities({});
-    setCreditMemoInput('0');
-    setContainerDepositInput('0');
     setCheckoutFeedback({
-      message: pdfResponse.data.opened
-        ? `Order ${orderResponse.data.order_number} saved and bill PDF downloaded.`
-        : `Order ${orderResponse.data.order_number} saved and PDF downloaded. Open it from your Downloads folder if it did not open automatically.`,
+      message: `Order ${orderResponse.data.order.order_number} saved. Receipt is ready below to view or print.`,
       tone: 'success',
     });
   };
@@ -1238,8 +1339,11 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
               <View style={styles.productsWrap}>
                 {filteredProducts.map(product => {
                   const quantity = selectedQuantities[product.id] ?? 0;
+                  const maxOrderableQuantity = getMaxOrderableQuantity(
+                    product.heldQuantity,
+                  );
                   const remainingQuantity = Math.max(
-                    product.heldQuantity - quantity,
+                    maxOrderableQuantity - quantity,
                     0,
                   );
 
@@ -1268,7 +1372,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                           </Text>
                         </View>
                         <Text style={styles.productHeldLabel}>
-                          {remainingQuantity} available
+                          {remainingQuantity} left for order
                         </Text>
                       </View>
 
@@ -1288,7 +1392,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                           </View>
                         ) : (
                           <Text style={styles.productHint}>
-                            Use +1, -1, or Add
+                            Max 10 per item
                           </Text>
                         )}
 
@@ -1432,8 +1536,11 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                     {selectedProducts.map(product => {
                       const quantity = selectedQuantities[product.id] ?? 0;
                       const lineTotal = quantity * product.unitPrice;
+                      const maxOrderableQuantity = getMaxOrderableQuantity(
+                        product.heldQuantity,
+                      );
                       const remainingQuantity = Math.max(
-                        product.heldQuantity - quantity,
+                        maxOrderableQuantity - quantity,
                         0,
                       );
 
@@ -1461,8 +1568,8 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                           </View>
 
                           <Text style={styles.selectedItemMeta}>
-                            Qty {quantity} in order, {remainingQuantity}{' '}
-                            remaining
+                            Qty {quantity} in order, {remainingQuantity} left
+                            for this order
                           </Text>
                           <Text style={styles.selectedItemTotal}>
                             {formatCurrency(lineTotal)}
@@ -1512,8 +1619,11 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                     {selectedProducts.map(product => {
                       const quantity = selectedQuantities[product.id] ?? 0;
                       const lineTotal = quantity * product.unitPrice;
+                      const maxOrderableQuantity = getMaxOrderableQuantity(
+                        product.heldQuantity,
+                      );
                       const remainingQuantity = Math.max(
-                        product.heldQuantity - quantity,
+                        maxOrderableQuantity - quantity,
                         0,
                       );
 
@@ -1550,7 +1660,8 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
                           <View style={styles.summaryItemFooter}>
                             <Text style={styles.summaryItemStock}>
-                              {quantity} in order, {remainingQuantity} remaining
+                              {quantity} in order, {remainingQuantity} left for
+                              this order
                             </Text>
 
                             <View style={styles.quantityPanel}>
@@ -1628,13 +1739,6 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                   </View>
                 </View>
 
-                {checkoutFeedback ? (
-                  <InlineMessage
-                    message={checkoutFeedback.message}
-                    tone={checkoutFeedback.tone}
-                  />
-                ) : null}
-
                 <View style={styles.summaryStatsRow}>
                   <View style={styles.summaryStatCard}>
                     <Text style={styles.summaryFooterLabel}>Total Units</Text>
@@ -1680,6 +1784,83 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                 </View>
               </View>
             )}
+
+            {checkoutFeedback ? (
+              <InlineMessage
+                message={checkoutFeedback.message}
+                tone={checkoutFeedback.tone}
+              />
+            ) : null}
+
+            {latestStoredBill ? (
+              <View style={styles.receiptActionCard}>
+                <View style={styles.receiptActionHeader}>
+                  <View style={styles.receiptActionBadge}>
+                    <Text style={styles.receiptActionBadgeLabel}>PDF</Text>
+                  </View>
+
+                  <View style={styles.receiptActionTextWrap}>
+                    <Text style={styles.receiptActionEyebrow}>
+                      Stored Receipt
+                    </Text>
+                    <Text style={styles.receiptActionTitle}>
+                      {latestStoredBill.order_number}
+                    </Text>
+                    <Text style={styles.receiptActionSubtitle}>
+                      Stored for {latestStoredBill.customer_name}.{' '}
+                      {formatReceiptTimestamp(latestStoredBill.generated_at)}.
+                      Open or print it without showing the raw backend link.
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.receiptActionButtons}>
+                  <Pressable
+                    disabled={receiptActionDisabled}
+                    onPress={openStoredReceipt}
+                    style={({pressed}) => [
+                      styles.receiptSecondaryButton,
+                      isCompactLayout ? styles.receiptActionButtonFull : null,
+                      receiptActionDisabled
+                        ? styles.receiptActionButtonDisabled
+                        : null,
+                      pressed && !receiptActionDisabled
+                        ? styles.receiptSecondaryButtonPressed
+                        : null,
+                    ]}>
+                    {receiptActionState === 'opening' ? (
+                      <ActivityIndicator color={palette.white} />
+                    ) : (
+                      <Text style={styles.receiptSecondaryButtonLabel}>
+                        View Receipt
+                      </Text>
+                    )}
+                  </Pressable>
+
+                  <Pressable
+                    disabled={receiptActionDisabled}
+                    onPress={printStoredReceipt}
+                    style={({pressed}) => [
+                      styles.receiptPrimaryButton,
+                      isCompactLayout ? styles.receiptActionButtonFull : null,
+                      receiptActionDisabled
+                        ? styles.receiptActionButtonDisabled
+                        : null,
+                      pressed && !receiptActionDisabled
+                        ? styles.receiptPrimaryButtonPressed
+                        : null,
+                    ]}>
+                    {receiptActionState === 'printing' ? (
+                      <ActivityIndicator color={palette.white} />
+                    ) : (
+                      <Text style={styles.receiptPrimaryButtonLabel}>
+                        Print Receipt
+                      </Text>
+                    )}
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
           </>
         ) : null}
       </View>
@@ -1734,8 +1915,8 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
             />
 
             <Text style={styles.quantityModalHint}>
-              Enter a whole number that does not exceed the remaining available
-              stock. Remaining updates while you type.
+              Enter a whole number up to the remaining order allowance. The
+              backend accepts a maximum of 10 units per item.
             </Text>
 
             {customQuantityError ? (
@@ -2350,6 +2531,111 @@ const styles = StyleSheet.create({
   payableBarTextWrap: {
     flex: 1,
     minWidth: 160,
+  },
+  receiptActionBadge: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(184,233,114,0.14)',
+    borderColor: 'rgba(184,233,114,0.34)',
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    height: 42,
+    justifyContent: 'center',
+    width: 58,
+  },
+  receiptActionBadgeLabel: {
+    color: '#D6F4A9',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+  },
+  receiptActionButtonDisabled: {
+    opacity: 0.58,
+  },
+  receiptActionButtonFull: {
+    width: '100%',
+  },
+  receiptActionButtons: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    marginTop: spacing.lg,
+  },
+  receiptActionCard: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: ui.darkBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    marginTop: spacing.lg,
+    padding: spacing.lg,
+  },
+  receiptActionEyebrow: {
+    color: '#B8E972',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.9,
+    marginBottom: spacing.xxs,
+    textTransform: 'uppercase',
+  },
+  receiptActionHeader: {
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  receiptActionSubtitle: {
+    color: ui.darkTextMuted,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  receiptActionTextWrap: {
+    flex: 1,
+  },
+  receiptActionTitle: {
+    color: palette.white,
+    fontSize: 19,
+    fontWeight: '900',
+    marginBottom: spacing.xs,
+  },
+  receiptPrimaryButton: {
+    alignItems: 'center',
+    backgroundColor: ui.highlight,
+    borderRadius: radii.pill,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 48,
+    minWidth: 150,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  receiptPrimaryButtonLabel: {
+    color: palette.white,
+    fontSize: 14,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  receiptPrimaryButtonPressed: {
+    opacity: 0.92,
+  },
+  receiptSecondaryButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderColor: ui.darkBorder,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 48,
+    minWidth: 150,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  receiptSecondaryButtonLabel: {
+    color: palette.white,
+    fontSize: 14,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  receiptSecondaryButtonPressed: {
+    opacity: 0.88,
   },
   paymentPill: {
     backgroundColor: ui.highlightSoft,

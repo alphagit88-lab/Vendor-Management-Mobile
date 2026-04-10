@@ -1,6 +1,7 @@
 package com.vendormanagementmobile
 
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Canvas
@@ -11,7 +12,15 @@ import android.graphics.pdf.PdfDocument
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.Environment
+import android.os.ParcelFileDescriptor
+import android.print.PageRange
+import android.print.PrintAttributes
+import android.print.PrintDocumentAdapter
+import android.print.PrintDocumentInfo
+import android.print.PrintManager
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import com.facebook.react.bridge.Arguments
@@ -24,8 +33,11 @@ import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.UiThreadUtil
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -56,6 +68,72 @@ class OrderPdfModule(reactContext: ReactApplicationContext) :
         promise.resolve(result)
       } catch (error: Exception) {
         promise.reject("PDF_GENERATION_ERROR", error.message, error)
+      }
+    }.start()
+  }
+
+  @ReactMethod
+  fun openPdfFromUrl(payload: ReadableMap, promise: Promise) {
+    Thread {
+      try {
+        val remotePdfRequest = payload.toRemotePdfRequest()
+        val file = downloadPdfToCache(remotePdfRequest)
+        val fileUri = getFileContentUri(file)
+        val opened = openPdf(fileUri)
+
+        val result = Arguments.createMap().apply {
+          putString("fileName", file.name)
+          putString("fileUri", fileUri.toString())
+          putBoolean("opened", opened)
+        }
+
+        promise.resolve(result)
+      } catch (error: Exception) {
+        promise.reject("PDF_OPEN_ERROR", error.message, error)
+      }
+    }.start()
+  }
+
+  @ReactMethod
+  fun printPdfFromUrl(payload: ReadableMap, promise: Promise) {
+    Thread {
+      try {
+        val remotePdfRequest = payload.toRemotePdfRequest()
+        val file = downloadPdfToCache(remotePdfRequest)
+        val fileUri = getFileContentUri(file)
+
+        UiThreadUtil.runOnUiThread {
+          try {
+            val activity =
+                currentActivity
+                    ?: throw IOException("Printing requires the app to stay open on screen.")
+            val printManager =
+                activity.getSystemService(Context.PRINT_SERVICE) as? PrintManager
+                    ?: throw IOException("Android print service is not available.")
+            val jobName =
+                remotePdfRequest.jobName.ifBlank {
+                  "Receipt ${file.nameWithoutExtension.ifBlank { "print" }}"
+                }
+
+            printManager.print(
+                jobName,
+                PdfFilePrintAdapter(file, jobName),
+                PrintAttributes.Builder().build(),
+            )
+
+            val result = Arguments.createMap().apply {
+              putString("fileName", file.name)
+              putString("fileUri", fileUri.toString())
+              putBoolean("queued", true)
+            }
+
+            promise.resolve(result)
+          } catch (error: Exception) {
+            promise.reject("PDF_PRINT_ERROR", error.message, error)
+          }
+        }
+      } catch (error: Exception) {
+        promise.reject("PDF_PRINT_ERROR", error.message, error)
       }
     }.start()
   }
@@ -352,6 +430,81 @@ class OrderPdfModule(reactContext: ReactApplicationContext) :
         file)
   }
 
+  private fun downloadPdfToCache(request: RemotePdfRequest): File {
+    if (request.url.isBlank()) {
+      throw IOException("Receipt URL is missing.")
+    }
+
+    val cacheDirectory = File(reactApplicationContext.cacheDir, "receipts")
+    if (!cacheDirectory.exists() && !cacheDirectory.mkdirs()) {
+      throw IOException("Unable to prepare local storage for the receipt.")
+    }
+
+    val connection = URL(request.url).openConnection() as HttpURLConnection
+
+    try {
+      connection.connectTimeout = 15000
+      connection.readTimeout = 30000
+      connection.requestMethod = "GET"
+      connection.setRequestProperty("Accept", "application/pdf")
+
+      if (request.token.isNotBlank()) {
+        connection.setRequestProperty("Authorization", "Bearer ${request.token}")
+      }
+
+      connection.connect()
+
+      val responseCode = connection.responseCode
+      if (responseCode !in 200..299) {
+        throw IOException("Unable to download the receipt PDF. Server returned $responseCode.")
+      }
+
+      val fileName = resolvePdfFileName(connection, request.fileName, request.url)
+      val outputFile = File(cacheDirectory, fileName)
+
+      connection.inputStream.use { inputStream ->
+        FileOutputStream(outputFile).use { outputStream ->
+          inputStream.copyTo(outputStream)
+        }
+      }
+
+      return outputFile
+    } finally {
+      connection.disconnect()
+    }
+  }
+
+  private fun resolvePdfFileName(
+      connection: HttpURLConnection,
+      preferredFileName: String,
+      urlValue: String,
+  ): String {
+    val contentDisposition = connection.getHeaderField("Content-Disposition").orEmpty()
+    val headerFileName =
+        contentDisposition
+            .substringAfter("filename=", "")
+            .trim()
+            .trim('"')
+    val urlFileName = Uri.parse(urlValue).lastPathSegment.orEmpty()
+    val rawFileName =
+        sequenceOf(preferredFileName, headerFileName, urlFileName, "receipt.pdf")
+            .firstOrNull { it.isNotBlank() }
+            ?: "receipt.pdf"
+    val sanitizedFileName = sanitizeFileName(rawFileName)
+
+    return if (sanitizedFileName.lowercase(Locale.US).endsWith(".pdf")) {
+      sanitizedFileName
+    } else {
+      "$sanitizedFileName.pdf"
+    }
+  }
+
+  private fun getFileContentUri(file: File): Uri =
+      FileProvider.getUriForFile(
+          reactApplicationContext,
+          "${reactApplicationContext.packageName}.fileprovider",
+          file)
+
   private fun formatCreatedAt(value: String): String {
     if (value.isBlank()) {
       return SimpleDateFormat("MMM dd, yyyy hh:mm a", Locale.US).format(Date())
@@ -371,7 +524,7 @@ class OrderPdfModule(reactContext: ReactApplicationContext) :
   }
 
   private fun sanitizeFileName(value: String): String =
-      value.replace(Regex("[^A-Za-z0-9_-]"), "_")
+      value.replace(Regex("[^A-Za-z0-9._-]"), "_")
 
   private fun ReadableArray.toBillItems(): List<BillItem> =
       (0 until size()).mapNotNull { index ->
@@ -406,6 +559,14 @@ class OrderPdfModule(reactContext: ReactApplicationContext) :
           totalDeposit = getOptionalDouble("totalDeposit"),
       )
 
+  private fun ReadableMap.toRemotePdfRequest(): RemotePdfRequest =
+      RemotePdfRequest(
+          fileName = getOptionalString("fileName"),
+          jobName = getOptionalString("jobName"),
+          token = getOptionalString("token"),
+          url = getOptionalString("url"),
+      )
+
   private fun ReadableMap.getOptionalDouble(key: String): Double =
       if (hasKey(key) && !isNull(key)) getDouble(key) else 0.0
 
@@ -437,4 +598,62 @@ class OrderPdfModule(reactContext: ReactApplicationContext) :
       val totalCredits: Double,
       val totalDeposit: Double,
   )
+
+  private data class RemotePdfRequest(
+      val fileName: String,
+      val jobName: String,
+      val token: String,
+      val url: String,
+  )
+
+  private class PdfFilePrintAdapter(
+      private val file: File,
+      private val documentName: String,
+  ) : PrintDocumentAdapter() {
+
+    override fun onLayout(
+        oldAttributes: PrintAttributes?,
+        newAttributes: PrintAttributes,
+        cancellationSignal: CancellationSignal,
+        callback: LayoutResultCallback,
+        extras: Bundle?,
+    ) {
+      if (cancellationSignal.isCanceled) {
+        callback.onLayoutCancelled()
+        return
+      }
+
+      val info =
+          PrintDocumentInfo.Builder(documentName)
+              .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+              .setPageCount(PrintDocumentInfo.PAGE_COUNT_UNKNOWN)
+              .build()
+
+      callback.onLayoutFinished(info, true)
+    }
+
+    override fun onWrite(
+        pageRanges: Array<PageRange>,
+        destination: ParcelFileDescriptor,
+        cancellationSignal: CancellationSignal,
+        callback: WriteResultCallback,
+    ) {
+      if (cancellationSignal.isCanceled) {
+        callback.onWriteCancelled()
+        return
+      }
+
+      try {
+        FileInputStream(file).use { inputStream ->
+          FileOutputStream(destination.fileDescriptor).use { outputStream ->
+            inputStream.copyTo(outputStream)
+          }
+        }
+
+        callback.onWriteFinished(arrayOf(PageRange.ALL_PAGES))
+      } catch (error: Exception) {
+        callback.onWriteFailed(error.message)
+      }
+    }
+  }
 }

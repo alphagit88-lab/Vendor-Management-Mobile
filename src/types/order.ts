@@ -53,11 +53,21 @@ export interface PersonalInventoryItem extends InventoryItem {
 
 export interface CreateOrderRequest {
   customerId: number;
+  items: CreateOrderItem[];
   loadNumber: string;
   notes: string;
   totalAmount: string;
   totalCredits: string;
   totalDeposit: string;
+}
+
+export interface CreateOrderItem {
+  itemId: number;
+  quantity: number;
+  subtotal: string;
+  unitPrice: string;
+  unitDeposit: string;
+  unitDiscount: string;
 }
 
 export interface CreatedOrder {
@@ -73,6 +83,22 @@ export interface CreatedOrder {
   load_number: string | null;
   total_credits: string;
   total_deposit: string;
+}
+
+export interface StoredOrderBill {
+  order_id: number;
+  order_number: string;
+  customer_name: string;
+  file_name: string;
+  file_path: string;
+  bill_link: string;
+  generated_at: string;
+}
+
+export interface CreatedOrderResult {
+  bill?: StoredOrderBill;
+  billGenerationError?: string;
+  order: CreatedOrder;
 }
 
 export interface OrderBillLineItem {
@@ -102,4 +128,18 @@ export interface GeneratedBillFile {
   fileName: string;
   fileUri: string;
   opened: boolean;
+}
+
+export interface StoredBillActionRequest {
+  fileName: string;
+  jobName?: string;
+  token?: string;
+  url: string;
+}
+
+export interface StoredBillActionResult {
+  fileName: string;
+  fileUri: string;
+  opened?: boolean;
+  queued?: boolean;
 }
