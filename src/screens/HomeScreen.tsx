@@ -861,6 +861,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     }
 
     let storedBill = orderResponse.data.bill ?? null;
+    let billIssueMessage = orderResponse.data.billGenerationError ?? null;
 
     if (!storedBill) {
       const billResponse = await orderService.getOrderBill(
@@ -870,6 +871,9 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
       if (billResponse.ok && billResponse.data) {
         storedBill = billResponse.data;
+        billIssueMessage = null;
+      } else if (billResponse.message) {
+        billIssueMessage = billResponse.message;
       }
     }
 
@@ -885,7 +889,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
         message: `Order ${
           orderResponse.data.order.order_number
         } saved, but the stored receipt is not ready yet. ${
-          orderResponse.data.billGenerationError ?? ''
+          billIssueMessage ?? ''
         }`.trim(),
         tone: 'info',
       });

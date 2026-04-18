@@ -5,6 +5,7 @@
   "scripts": {
     "android": "react-native run-android",
     "start": "react-native start",
+    "start:reset": "react-native start --reset-cache",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "clean": "cd android && gradlew.bat clean"
