@@ -56,18 +56,18 @@ export interface CreateOrderRequest {
   items: CreateOrderItem[];
   loadNumber: string;
   notes: string;
-  totalAmount: string;
-  totalCredits: string;
-  totalDeposit: string;
+  totalAmount: number;
+  totalCredits: number;
+  totalDeposit: number;
 }
 
 export interface CreateOrderItem {
   itemId: number;
   quantity: number;
-  subtotal: string;
-  unitPrice: string;
-  unitDeposit: string;
-  unitDiscount: string;
+  subtotal: number;
+  unitPrice: number;
+  unitDeposit: number;
+  unitDiscount: number;
 }
 
 export interface CreatedOrder {
@@ -96,7 +96,10 @@ export interface StoredOrderBill {
 }
 
 export interface CreatedOrderResult {
-  bill?: StoredOrderBill;
+  bill?: {
+    url: string;
+    file_name: string;
+  };
   billGenerationError?: string;
   order: CreatedOrder;
 }

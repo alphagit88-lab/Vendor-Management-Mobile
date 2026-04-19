@@ -25,7 +25,10 @@ interface EntityResponse<T> {
 interface CreateOrderResponse {
   success?: boolean;
   data?: CreatedOrder;
-  bill?: StoredOrderBill;
+  bill?: {
+    url: string;
+    file_name: string;
+  };
   bill_generation_error?: string;
   message?: string;
 }
@@ -148,14 +151,14 @@ export const orderService = {
   async getOrderBill(
     token: string,
     orderId: number,
-  ): Promise<ServiceResult<StoredOrderBill>> {
+  ): Promise<ServiceResult<{ url: string; file_name: string }>> {
     try {
       const response = await fetch(`${API_BASE_URL}/orders/${orderId}/bill`, {
         method: 'GET',
         headers: getHeaders(token),
       });
 
-      const payload = await readJsonResponse<EntityResponse<StoredOrderBill>>(
+      const payload = await readJsonResponse<EntityResponse<{ url: string; file_name: string }>>(
         response,
       );
 

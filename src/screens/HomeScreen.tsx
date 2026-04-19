@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import Geolocation, {
   GeolocationError,
   GeolocationResponse,
@@ -10,30 +10,35 @@ import {
   PermissionsAndroid,
   Platform,
   Pressable,
+  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
   useWindowDimensions,
+  Linking,
 } from 'react-native';
+import Pdf from 'react-native-pdf';
+import RNPrint from 'react-native-print';
+import { BLEPrinter } from '@haroldtran/react-native-thermal-printer';
 
-import {InlineMessage} from '../components/common/InlineMessage';
-import {ScreenContainer} from '../components/common/ScreenContainer';
-import {StatePanel} from '../components/common/StatePanel';
-import {buildBackendUrl} from '../constants/api';
-import {orderService} from '../services/orderService';
-import {pdfService} from '../services/pdfService';
-import {palette} from '../theme/colors';
+import { InlineMessage } from '../components/common/InlineMessage';
+import { ScreenContainer } from '../components/common/ScreenContainer';
+import { StatePanel } from '../components/common/StatePanel';
+import { buildBackendUrl } from '../constants/api';
+import { orderService } from '../services/orderService';
+import { pdfService } from '../services/pdfService';
+import { palette } from '../theme/colors';
 import {
   getContentWidth,
   getDeviceType,
   getHorizontalPadding,
   moderateScale,
 } from '../theme/responsive';
-import {radii, shadowPresets} from '../theme/shape';
-import {spacing} from '../theme/spacing';
-import {AuthSession, ContentLoadState} from '../types/auth';
+import { radii, shadowPresets } from '../theme/shape';
+import { spacing } from '../theme/spacing';
+import { AuthSession, ContentLoadState } from '../types/auth';
 import {
   Category,
   Customer,
@@ -46,7 +51,7 @@ type LoadStatus = 'idle' | ContentLoadState;
 type CheckoutState = 'idle' | 'loading';
 type FeedbackTone = 'error' | 'info' | 'success';
 type DeviceLocationStatus = 'idle' | 'loading' | 'ready' | 'denied' | 'error';
-type ReceiptActionState = 'idle' | 'opening' | 'printing';
+type ReceiptActionState = 'idle' | 'opening' | 'printing' | 'loading';
 
 interface HomeScreenProps {
   onSignOut: () => void;
@@ -165,9 +170,9 @@ const getCustomerDistanceKilometers = (
   const haversineComponent =
     Math.sin(latitudeDistance / 2) * Math.sin(latitudeDistance / 2) +
     Math.cos(currentLatitude) *
-      Math.cos(customerLatitude) *
-      Math.sin(longitudeDistance / 2) *
-      Math.sin(longitudeDistance / 2);
+    Math.cos(customerLatitude) *
+    Math.sin(longitudeDistance / 2) *
+    Math.sin(longitudeDistance / 2);
   const arcDistance =
     2 *
     Math.atan2(
@@ -258,8 +263,8 @@ const ui = {
   textMuted: '#738278',
 };
 
-export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
-  const {width} = useWindowDimensions();
+export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
+  const { width } = useWindowDimensions();
   const [view, setView] = useState<HomeView>('home');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [customersStatus, setCustomersStatus] = useState<LoadStatus>('idle');
@@ -301,10 +306,28 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
   );
   const [checkoutFeedback, setCheckoutFeedback] =
     useState<CheckoutFeedback | null>(null);
-  const [latestStoredBill, setLatestStoredBill] =
-    useState<StoredOrderBill | null>(null);
+  const [latestStoredBill, setLatestStoredBill] = useState<{
+    bill_link: string;
+    url: string;
+    file_name: string;
+    order_number: string;
+    customer_name?: string;
+    generated_at: string;
+  } | null>(null);
+  const [isBillModalVisible, setIsBillModalVisible] = useState(false);
+  const [pdfBase64, setPdfBase64] = useState<string | null>(null);
+  const [isPdfLoading, setIsPdfLoading] = useState(false);
   const [receiptActionState, setReceiptActionState] =
     useState<ReceiptActionState>('idle');
+
+  useEffect(() => {
+    if (checkoutFeedback) {
+      const timer = setTimeout(() => {
+        setCheckoutFeedback(null);
+      }, 6000); // Hide after 6 seconds
+      return () => clearTimeout(timer);
+    }
+  }, [checkoutFeedback]);
 
   const contentWidth = getContentWidth(width);
   const horizontalPadding = getHorizontalPadding(width);
@@ -319,16 +342,16 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
   const productCardLayoutStyle = isTabletLayout
     ? styles.productCardThird
     : twoColumnLayout
-    ? styles.productCardHalf
-    : null;
+      ? styles.productCardHalf
+      : null;
   const screenContentStyle = [
     styles.screenContent,
-    {paddingHorizontal: horizontalPadding},
+    { paddingHorizontal: horizontalPadding },
   ];
-  const sectionWidthStyle = {width: layoutWidth};
-  const categoryDropdownCardStyle = {width: Math.min(layoutWidth, 420)};
-  const quantityModalCardStyle = {width: Math.min(layoutWidth, 360)};
-  const titleSizeStyle = {fontSize: moderateScale(34, width, 0.28)};
+  const sectionWidthStyle = { width: layoutWidth };
+  const categoryDropdownCardStyle = { width: Math.min(layoutWidth, 420) };
+  const quantityModalCardStyle = { width: Math.min(layoutWidth, 360) };
+  const titleSizeStyle = { fontSize: moderateScale(34, width, 0.28) };
   const productCategories = Array.from(
     new Map(
       [
@@ -344,9 +367,9 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     .sort((firstCategory, secondCategory) =>
       firstCategory[1].localeCompare(secondCategory[1]),
     )
-    .map(([value, label]) => ({label, value}));
+    .map(([value, label]) => ({ label, value }));
   const productCategoryOptions = [
-    {label: 'All Categories', value: ALL_PRODUCT_CATEGORY},
+    { label: 'All Categories', value: ALL_PRODUCT_CATEGORY },
     ...productCategories,
   ];
   const isCategoryDropdownDisabled = categoriesStatus === 'loading';
@@ -420,8 +443,8 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
   const nearestCustomerId =
     locationStatus === 'ready'
       ? sortedCustomers.find(
-          sortedCustomer => sortedCustomer.distanceFromDevice !== null,
-        )?.customer.id ?? null
+        sortedCustomer => sortedCustomer.distanceFromDevice !== null,
+      )?.customer.id ?? null
       : null;
 
   const selectedProducts = products.filter(
@@ -461,16 +484,16 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     : 0;
   const quantityModalBaseRemainingQuantity = quantityModalProduct
     ? Math.max(
-        getMaxOrderableQuantity(quantityModalProduct.heldQuantity) -
-          quantityModalCurrentQuantity,
-        0,
-      )
+      getMaxOrderableQuantity(quantityModalProduct.heldQuantity) -
+      quantityModalCurrentQuantity,
+      0,
+    )
     : 0;
   const quantityModalPreviewRemainingQuantity = quantityModalProduct
     ? Math.max(
-        quantityModalBaseRemainingQuantity - quantityModalRequestedUnits,
-        0,
-      )
+      quantityModalBaseRemainingQuantity - quantityModalRequestedUnits,
+      0,
+    )
     : 0;
 
   const resetCheckoutState = () => {
@@ -683,7 +706,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
       );
 
       if (nextQuantity === 0) {
-        const nextSelections = {...current};
+        const nextSelections = { ...current };
         delete nextSelections[product.id];
         return nextSelections;
       }
@@ -716,8 +739,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
     if (requestedQuantity > quantityModalBaseRemainingQuantity) {
       setCustomQuantityError(
-        `You can add only ${quantityModalBaseRemainingQuantity} more unit${
-          quantityModalBaseRemainingQuantity === 1 ? '' : 's'
+        `You can add only ${quantityModalBaseRemainingQuantity} more unit${quantityModalBaseRemainingQuantity === 1 ? '' : 's'
         }.`,
       );
       return;
@@ -734,7 +756,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
         return current;
       }
 
-      const nextSelections = {...current};
+      const nextSelections = { ...current };
       delete nextSelections[productId];
       return nextSelections;
     });
@@ -750,68 +772,161 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     setContainerDepositInput(sanitizeCurrencyInput(value));
   };
 
+  useEffect(() => {
+    // EscPosPrinter setup if needed
+  }, []);
+
+  const bluetoothPrintReceipt = async (billData?: any) => {
+    try {
+      const bill = billData || latestStoredBill;
+      if (!bill) return false;
+
+      // Request Runtime Permissions for Android 12+
+      if (Platform.OS === 'android') {
+        const permissions = [
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        ];
+        
+        const granted = await PermissionsAndroid.requestMultiple(permissions);
+        const allGranted = Object.values(granted).every(status => status === PermissionsAndroid.RESULTS.GRANTED);
+        
+        if (!allGranted) {
+          setCheckoutFeedback({
+            message: 'Bluetooth permissions are required to print.',
+            tone: 'error'
+          });
+          return false;
+        }
+      }
+
+      // Initialize the Bluetooth driver
+      await BLEPrinter.init();
+      
+      // Get list of paired devices
+      const devices = await BLEPrinter.getDeviceList();
+      if (!devices || devices.length === 0) {
+        setCheckoutFeedback({
+          message: 'No paired bluetooth printers found. Please pair your device first.',
+          tone: 'error'
+        });
+        return false;
+      }
+
+      // Auto-select first printer or one with 'printer' in name
+      const targetDevice = devices.find(d => 
+        d.device_name?.toLowerCase().includes('printer') || 
+        d.device_name?.toLowerCase().includes('pos')
+      ) || devices[0];
+
+      // Connect to the printer
+      await BLEPrinter.connectPrinter(targetDevice.inner_mac_address);
+
+      // Build text-based payload
+      let payload = `<CB>SILVER EAGLE DISTRIBUTORS</CB>\n`;
+      payload += `<C>PO BOX 841521, DALLAS, TX 75284</C>\n`;
+      payload += `<C>Phone: 713-869-4361</C>\n`;
+      payload += `<L>--------------------------------</L>\n`;
+      payload += `<L>Invoice#: ${bill.order_number}</L>\n`;
+      payload += `<L>Customer: ${bill.customer_name}</L>\n`;
+      payload += `<L>Date: ${new Date().toLocaleString()}</L>\n`;
+      payload += `<L>--------------------------------</L>\n`;
+      payload += `<B>ITEM           QTY    PRICE</B>\n`;
+      
+      selectedProducts.forEach(p => {
+        const qty = selectedQuantities[p.id] || 0;
+        const price = (p.unitPrice * qty).toFixed(2);
+        const name = p.item_name.substring(0, 14).padEnd(14);
+        const qStr = qty.toString().padEnd(6);
+        payload += `<L>${name} ${qStr} $${price}</L>\n`;
+      });
+
+      payload += `<L>--------------------------------</L>\n`;
+      payload += `<R><B>TOTAL: $${totalPayable.toFixed(2)}</B></R>\n`;
+      payload += `\n\n<C>Thank you!</C>\n\n\n`;
+
+      // Print the bill
+      await BLEPrinter.printBill(payload);
+      
+      return true;
+    } catch (error: any) {
+      const rawError = error?.message || String(error) || 'Unknown Print Error';
+      console.log('BLE Print Error:', rawError);
+      
+      setCheckoutFeedback({
+        message: `Print Error: ${rawError}`,
+        tone: 'error'
+      });
+      return false;
+    }
+  };
+
+
+  const fetchPdfAsBase64 = async (url: string) => {
+    setIsPdfLoading(true);
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+
+      return new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64String = reader.result as string;
+          // Remove the data:application/pdf;base64, prefix
+          resolve(base64String.split(',')[1]);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    } catch (error) {
+      console.error('Failed to fetch PDF:', error);
+      return null;
+    } finally {
+      setIsPdfLoading(false);
+    }
+  };
+
   const openStoredReceipt = async () => {
-    if (!latestStoredBill) {
-      return;
-    }
-
-    setReceiptActionState('opening');
-
-    const response = await pdfService.openStoredBill({
-      fileName: latestStoredBill.file_name,
-      token: session.token,
-      url: buildBackendUrl(latestStoredBill.bill_link),
-    });
-
-    setReceiptActionState('idle');
-
-    if (!response.ok || !response.data) {
+    if (!latestStoredBill) return;
+    
+    // Fallback to visual preview
+    const base64 = await fetchPdfAsBase64(latestStoredBill.url);
+    if (base64) {
+      setPdfBase64(base64);
+      setIsBillModalVisible(true);
+    } else {
       setCheckoutFeedback({
-        message: response.message ?? 'Unable to open the stored receipt.',
-        tone: 'error',
+        message: 'Unable to load the receipt preview.',
+        tone: 'error'
       });
-      return;
     }
-
-    setCheckoutFeedback({
-      message: response.data.opened
-        ? `Receipt ${latestStoredBill.order_number} opened.`
-        : `Receipt ${latestStoredBill.order_number} downloaded. Open it from your device if it did not appear automatically.`,
-      tone: 'success',
-    });
   };
 
-  const printStoredReceipt = async () => {
-    if (!latestStoredBill) {
-      return;
-    }
-
-    setReceiptActionState('printing');
-
-    const response = await pdfService.printStoredBill({
-      fileName: latestStoredBill.file_name,
-      jobName: `Receipt ${latestStoredBill.order_number}`,
-      token: session.token,
-      url: buildBackendUrl(latestStoredBill.bill_link),
-    });
-
+  const manualPrintReceipt = async () => {
+    if (!latestStoredBill) return;
+    setCheckoutFeedback(null); // Clear previous errors
+    setReceiptActionState('loading');
+    const success = await bluetoothPrintReceipt();
     setReceiptActionState('idle');
-
-    if (!response.ok || !response.data) {
-      setCheckoutFeedback({
-        message: response.message ?? 'Unable to print the stored receipt.',
-        tone: 'error',
-      });
-      return;
+    if (success) {
+      setCheckoutFeedback({ message: 'Receipt sent to printer.', tone: 'success' });
     }
-
-    setCheckoutFeedback({
-      message: `Print dialog opened for receipt ${latestStoredBill.order_number}.`,
-      tone: 'success',
-    });
   };
+
+  const printCurrentBill = async (url?: string) => {
+    const filePath = url || latestStoredBill?.url;
+    if (!filePath) return;
+    try {
+      await RNPrint.print({ filePath });
+    } catch (error) {
+      console.error('Print failed:', error);
+    }
+  };
+
 
   const handleGenerateBill = async () => {
+    setCheckoutFeedback(null); // Clear previous errors
     if (!selectedCustomer || !selectedProducts.length) {
       return;
     }
@@ -833,22 +948,22 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
       customerId: selectedCustomer.id,
       items: selectedProducts.map(product => {
         const quantity = selectedQuantities[product.id] ?? 0;
-        const subtotal = quantity * product.unitPrice;
+        const subtotalValue = quantity * (product.unitPrice || 0);
 
         return {
           itemId: product.id,
           quantity,
-          subtotal: subtotal.toFixed(2),
-          unitDeposit: '0.00',
-          unitDiscount: '0.00',
-          unitPrice: product.unitPrice.toFixed(2),
+          subtotal: Number(subtotalValue.toFixed(2)),
+          unitPrice: Number((product.unitPrice || 0).toFixed(2)),
+          unitDeposit: 0,
+          unitDiscount: 0
         };
       }),
       loadNumber: 'POS',
       notes: `POS Sale to ${selectedCustomer.name}`,
-      totalAmount: itemSubtotal.toFixed(2),
-      totalCredits: creditMemoAmount.toFixed(2),
-      totalDeposit: containerDepositAmount.toFixed(2),
+      totalAmount: Number(itemSubtotal.toFixed(2)),
+      totalCredits: Number(creditMemoAmount.toFixed(2)),
+      totalDeposit: Number(containerDepositAmount.toFixed(2)),
     });
 
     if (!orderResponse.ok || !orderResponse.data) {
@@ -882,24 +997,41 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
     setCreditMemoInput('0');
     setContainerDepositInput('0');
     setIsSummaryVisible(false);
-    setLatestStoredBill(storedBill);
+
+    const billData = storedBill ? {
+      ...storedBill,
+      bill_link: storedBill.url,
+      order_number: orderResponse.data.order.order_number,
+      customer_name: selectedCustomer.name,
+      generated_at: new Date().toISOString()
+    } : null;
+
+    setLatestStoredBill(billData);
 
     if (!storedBill) {
       setCheckoutFeedback({
-        message: `Order ${
-          orderResponse.data.order.order_number
-        } saved, but the stored receipt is not ready yet. ${
-          billIssueMessage ?? ''
-        }`.trim(),
+        message: `Order ${orderResponse.data.order.order_number
+          } saved, but the stored receipt is not ready yet. ${billIssueMessage ?? ''
+          }`.trim(),
         tone: 'info',
       });
       return;
     }
 
     setCheckoutFeedback({
-      message: `Order ${orderResponse.data.order.order_number} saved. Receipt is ready below to view or print.`,
+      message: `Order ${orderResponse.data.order.order_number} saved.`,
       tone: 'success',
     });
+
+    // AUTO-OPEN PREVIEW
+    const base64 = await fetchPdfAsBase64(storedBill.url);
+    if (base64) {
+      setPdfBase64(base64);
+      setIsBillModalVisible(true);
+    }
+
+    // BACKGROUND PRINT (Silent)
+    bluetoothPrintReceipt(storedBill);
   };
 
   const renderHome = () => (
@@ -967,7 +1099,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
             </View>
             <Pressable
               onPress={loadCurrentLocation}
-              style={({pressed}) => [
+              style={({ pressed }) => [
                 styles.locationActionButton,
                 pressed ? styles.locationActionButtonPressed : null,
               ]}>
@@ -977,8 +1109,8 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
         ) : null}
 
         {locationStatus !== 'idle' &&
-        locationStatus !== 'loading' &&
-        locationStatus !== 'ready' ? (
+          locationStatus !== 'loading' &&
+          locationStatus !== 'ready' ? (
           <View style={styles.locationCard}>
             <View style={styles.locationCardText}>
               <Text style={styles.locationCardTitle}>Location unavailable</Text>
@@ -989,7 +1121,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
             </View>
             <Pressable
               onPress={loadCurrentLocation}
-              style={({pressed}) => [
+              style={({ pressed }) => [
                 styles.locationActionButton,
                 pressed ? styles.locationActionButtonPressed : null,
               ]}>
@@ -1032,7 +1164,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
         {customersStatus === 'ready' ? (
           <View style={styles.cardStack}>
-            {sortedCustomers.map(({customer, distanceFromDevice}) => {
+            {sortedCustomers.map(({ customer, distanceFromDevice }) => {
               const distanceSignal =
                 distanceFromDevice !== null
                   ? getDistanceSignal(distanceFromDevice)
@@ -1044,7 +1176,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                 <Pressable
                   key={customer.id}
                   onPress={() => selectCustomer(customer)}
-                  style={({pressed}) => [
+                  style={({ pressed }) => [
                     styles.customerCard,
                     pressed ? styles.customerCardPressed : null,
                   ]}>
@@ -1128,11 +1260,10 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                         <Text style={styles.customerMetaIcon}>Distance</Text>
                         <Text style={styles.customerMetaValue}>
                           {distanceFromDevice !== null
-                            ? `${formatDistanceKilometers(distanceFromDevice)}${
-                                distanceSignal
-                                  ? ` | ${distanceSignal.label}`
-                                  : ''
-                              }`
+                            ? `${formatDistanceKilometers(distanceFromDevice)}${distanceSignal
+                              ? ` | ${distanceSignal.label}`
+                              : ''
+                            }`
                             : 'No customer coordinates'}
                         </Text>
                       </View>
@@ -1195,7 +1326,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
           <View style={styles.selectedCustomerPanel}>
             <Pressable
               onPress={() => setIsCustomerDetailsExpanded(current => !current)}
-              style={({pressed}) => [
+              style={({ pressed }) => [
                 styles.selectedCustomerToggle,
                 pressed ? styles.selectedCustomerTogglePressed : null,
               ]}>
@@ -1213,14 +1344,14 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
               <View style={styles.selectedCustomerDetails}>
                 {normalizeText(
                   selectedCustomer.registered_company_name ||
-                    selectedCustomer.name,
+                  selectedCustomer.name,
                 ) !== normalizeText(selectedCustomer.name) ? (
                   <Text
                     numberOfLines={2}
                     style={styles.selectedCustomerCompany}>
                     {normalizeText(
                       selectedCustomer.registered_company_name ||
-                        selectedCustomer.name,
+                      selectedCustomer.name,
                     )}
                   </Text>
                 ) : null}
@@ -1293,7 +1424,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
               <Pressable
                 disabled={isCategoryDropdownDisabled}
                 onPress={() => setIsCategoryDropdownVisible(true)}
-                style={({pressed}) => [
+                style={({ pressed }) => [
                   styles.productCategoryDropdown,
                   isCategoryDropdownDisabled
                     ? styles.productCategoryDropdownDisabled
@@ -1359,7 +1490,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                           updateQuantity(product, 1);
                         }
                       }}
-                      style={({pressed}) => [
+                      style={({ pressed }) => [
                         styles.productCard,
                         productCardLayoutStyle,
                         quantity > 0 ? styles.productCardSelected : null,
@@ -1407,7 +1538,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                               event.stopPropagation();
                               updateQuantity(product, -1);
                             }}
-                            style={({pressed}) => [
+                            style={({ pressed }) => [
                               styles.productStepButton,
                               quantity === 0
                                 ? styles.productStepButtonDisabled
@@ -1427,7 +1558,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                               event.stopPropagation();
                               updateQuantity(product, 1);
                             }}
-                            style={({pressed}) => [
+                            style={({ pressed }) => [
                               styles.productStepButton,
                               remainingQuantity === 0
                                 ? styles.productStepButtonDisabled
@@ -1447,7 +1578,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                               event.stopPropagation();
                               openQuantityModal(product);
                             }}
-                            style={({pressed}) => [
+                            style={({ pressed }) => [
                               styles.productCustomAddButton,
                               remainingQuantity === 0
                                 ? styles.productCustomAddButtonDisabled
@@ -1494,7 +1625,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
                 <Pressable
                   onPress={() => setIsSummaryVisible(current => !current)}
-                  style={({pressed}) => [
+                  style={({ pressed }) => [
                     styles.summaryToggleButton,
                     pressed ? styles.summaryToggleButtonPressed : null,
                   ]}>
@@ -1558,7 +1689,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                             </Text>
                             <Pressable
                               onPress={() => removeProduct(product.id)}
-                              style={({pressed}) => [
+                              style={({ pressed }) => [
                                 styles.selectedItemRemoveButton,
                                 pressed
                                   ? styles.selectedItemRemoveButtonPressed
@@ -1610,7 +1741,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                   </View>
                   <Pressable
                     onPress={() => setIsSummaryVisible(false)}
-                    style={({pressed}) => [
+                    style={({ pressed }) => [
                       styles.summaryCloseButton,
                       pressed ? styles.summaryCloseButtonPressed : null,
                     ]}>
@@ -1650,7 +1781,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
                             <Pressable
                               onPress={() => removeProduct(product.id)}
-                              style={({pressed}) => [
+                              style={({ pressed }) => [
                                 styles.summaryRemoveButton,
                                 pressed
                                   ? styles.summaryRemoveButtonPressed
@@ -1671,7 +1802,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                             <View style={styles.quantityPanel}>
                               <Pressable
                                 onPress={() => updateQuantity(product, -1)}
-                                style={({pressed}) => [
+                                style={({ pressed }) => [
                                   styles.quantityButton,
                                   pressed ? styles.quantityButtonPressed : null,
                                 ]}>
@@ -1689,7 +1820,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
                               <Pressable
                                 onPress={() => updateQuantity(product, 1)}
-                                style={({pressed}) => [
+                                style={({ pressed }) => [
                                   styles.quantityButton,
                                   pressed ? styles.quantityButtonPressed : null,
                                 ]}>
@@ -1767,7 +1898,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                   <Pressable
                     disabled={generateBillDisabled}
                     onPress={handleGenerateBill}
-                    style={({pressed}) => [
+                    style={({ pressed }) => [
                       styles.generateBillButton,
                       isCompactLayout ? styles.generateBillButtonFull : null,
                       generateBillDisabled
@@ -1805,7 +1936,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
                   <View style={styles.receiptActionTextWrap}>
                     <Text style={styles.receiptActionEyebrow}>
-                      Stored Receipt
+                      Generated Receipt
                     </Text>
                     <Text style={styles.receiptActionTitle}>
                       {latestStoredBill.order_number}
@@ -1813,52 +1944,36 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                     <Text style={styles.receiptActionSubtitle}>
                       Stored for {latestStoredBill.customer_name}.{' '}
                       {formatReceiptTimestamp(latestStoredBill.generated_at)}.
-                      Open or print it without showing the raw backend link.
                     </Text>
                   </View>
                 </View>
 
-                <View style={styles.receiptActionButtons}>
+                <View style={[styles.receiptActionButtons, { flexDirection: 'row', gap: spacing.md }]}>
                   <Pressable
-                    disabled={receiptActionDisabled}
                     onPress={openStoredReceipt}
-                    style={({pressed}) => [
+                    style={({ pressed }) => [
                       styles.receiptSecondaryButton,
-                      isCompactLayout ? styles.receiptActionButtonFull : null,
-                      receiptActionDisabled
-                        ? styles.receiptActionButtonDisabled
-                        : null,
-                      pressed && !receiptActionDisabled
-                        ? styles.receiptSecondaryButtonPressed
-                        : null,
+                      { flex: 1 },
+                      pressed ? styles.receiptSecondaryButtonPressed : null,
                     ]}>
-                    {receiptActionState === 'opening' ? (
-                      <ActivityIndicator color={palette.white} />
-                    ) : (
-                      <Text style={styles.receiptSecondaryButtonLabel}>
-                        View Receipt
-                      </Text>
-                    )}
+                    <Text style={styles.receiptSecondaryButtonLabel}>
+                      View
+                    </Text>
                   </Pressable>
 
                   <Pressable
-                    disabled={receiptActionDisabled}
-                    onPress={printStoredReceipt}
-                    style={({pressed}) => [
-                      styles.receiptPrimaryButton,
-                      isCompactLayout ? styles.receiptActionButtonFull : null,
-                      receiptActionDisabled
-                        ? styles.receiptActionButtonDisabled
-                        : null,
-                      pressed && !receiptActionDisabled
-                        ? styles.receiptPrimaryButtonPressed
-                        : null,
+                    onPress={manualPrintReceipt}
+                    disabled={receiptActionState === 'loading'}
+                    style={({ pressed }) => [
+                      styles.receiptSecondaryButton,
+                      { flex: 1 },
+                      pressed ? styles.receiptSecondaryButtonPressed : null,
                     ]}>
-                    {receiptActionState === 'printing' ? (
-                      <ActivityIndicator color={palette.white} />
+                    {receiptActionState === 'loading' ? (
+                      <ActivityIndicator size="small" color={ui.textHeading} />
                     ) : (
-                      <Text style={styles.receiptPrimaryButtonLabel}>
-                        Print Receipt
+                      <Text style={styles.receiptSecondaryButtonLabel}>
+                        Print
                       </Text>
                     )}
                   </Pressable>
@@ -1930,7 +2045,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
             <View style={styles.quantityModalActions}>
               <Pressable
                 onPress={closeQuantityModal}
-                style={({pressed}) => [
+                style={({ pressed }) => [
                   styles.quantityModalCancelButton,
                   pressed ? styles.quantityModalCancelButtonPressed : null,
                 ]}>
@@ -1942,7 +2057,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
               <Pressable
                 disabled={quantityModalBaseRemainingQuantity === 0}
                 onPress={addCustomQuantity}
-                style={({pressed}) => [
+                style={({ pressed }) => [
                   styles.quantityModalConfirmButton,
                   quantityModalBaseRemainingQuantity === 0
                     ? styles.quantityModalConfirmButtonDisabled
@@ -1988,7 +2103,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
                     setSelectedProductCategory(category.value);
                     closeCategoryDropdown();
                   }}
-                  style={({pressed}) => [
+                  style={({ pressed }) => [
                     styles.categoryDropdownOption,
                     selectedProductCategory === category.value
                       ? styles.categoryDropdownOptionActive
@@ -2010,7 +2125,7 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
 
             <Pressable
               onPress={closeCategoryDropdown}
-              style={({pressed}) => [
+              style={({ pressed }) => [
                 styles.categoryDropdownCloseButton,
                 pressed ? styles.categoryDropdownCloseButtonPressed : null,
               ]}>
@@ -2019,34 +2134,97 @@ export const HomeScreen = ({onSignOut, session}: HomeScreenProps) => {
           </View>
         </View>
       </Modal>
+
+      <Modal
+        animationType="slide"
+        onRequestClose={() => setIsBillModalVisible(false)}
+        visible={isBillModalVisible}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: ui.darkSurface }}>
+          <View style={[styles.modalHeader, { backgroundColor: ui.darkSurfaceRaised, borderBottomWidth: 1, borderBottomColor: ui.darkBorder, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: spacing.lg, height: 60 }]}>
+            <Text style={{ color: palette.white, fontSize: 18, fontWeight: '900' }}>Receipt Preview</Text>
+
+            <Pressable
+              onPress={() => setIsBillModalVisible(false)}
+              style={({ pressed }) => [
+                {
+                  backgroundColor: pressed ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)',
+                  borderRadius: 20,
+                  width: 40,
+                  height: 40,
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }
+              ]}>
+              <Text style={{
+                color: palette.white,
+                fontSize: 16,
+                fontWeight: '400',
+                lineHeight: 18,
+                textAlign: 'center',
+                includeFontPadding: false
+              }}>✕</Text>
+            </Pressable>
+          </View>
+
+          <View style={{ flex: 1, backgroundColor: palette.white }}>
+            {isPdfLoading ? (
+              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: palette.white }}>
+                <ActivityIndicator color={palette.primaryStrong} size="large" />
+                <Text style={{ color: ui.textBody, marginTop: spacing.md }}>Loading Receipt...</Text>
+              </View>
+            ) : pdfBase64 ? (
+              <Pdf
+                source={{ uri: `data:application/pdf;base64,${pdfBase64}` }}
+                style={{ flex: 1, width: width, backgroundColor: palette.white }}
+                spacing={0}
+                fitPolicy={0}
+                trustAllCerts={false}
+                onLoadComplete={(numberOfPages) => {
+                  console.log(`Number of pages: ${numberOfPages}`);
+                }}
+                onError={(error) => {
+                  console.log(error);
+                }}
+              />
+            ) : (
+              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                <Text style={{ color: palette.white }}>No receipt data available.</Text>
+              </View>
+            )}
+          </View>
+        </SafeAreaView>
+      </Modal>
+
     </>
   );
 
   return (
-    <ScreenContainer contentContainerStyle={screenContentStyle}>
-      <View style={styles.backgroundGlowPrimary} />
-      <View style={styles.backgroundGlowSecondary} />
-      <View style={[styles.utilityRow, sectionWidthStyle]}>
-        <View style={styles.userBadge}>
-          <Text numberOfLines={1} style={styles.userBadgeLabel}>
-            {session.user.name}
-          </Text>
+    <View style={{ flex: 1 }}>
+      <ScreenContainer contentContainerStyle={screenContentStyle}>
+        <View style={styles.backgroundGlowPrimary} />
+        <View style={styles.backgroundGlowSecondary} />
+        <View style={[styles.utilityRow, sectionWidthStyle]}>
+          <View style={styles.userBadge}>
+            <Text numberOfLines={1} style={styles.userBadgeLabel}>
+              {session.user.name}
+            </Text>
+          </View>
+
+          <Pressable
+            onPress={onSignOut}
+            style={({ pressed }) => [
+              styles.signOutButton,
+              pressed ? styles.signOutButtonPressed : null,
+            ]}>
+            <Text style={styles.signOutButtonLabel}>Sign out</Text>
+          </Pressable>
         </View>
 
-        <Pressable
-          onPress={onSignOut}
-          style={({pressed}) => [
-            styles.signOutButton,
-            pressed ? styles.signOutButtonPressed : null,
-          ]}>
-          <Text style={styles.signOutButtonLabel}>Sign out</Text>
-        </Pressable>
-      </View>
-
-      {view === 'home' ? renderHome() : null}
-      {view === 'customers' ? renderCustomers() : null}
-      {view === 'products' ? renderProducts() : null}
-    </ScreenContainer>
+        {view === 'home' ? renderHome() : null}
+        {view === 'customers' ? renderCustomers() : null}
+        {view === 'products' ? renderProducts() : null}
+      </ScreenContainer>
+    </View>
   );
 };
 
@@ -2306,7 +2484,7 @@ const styles = StyleSheet.create({
     height: 12,
     width: 12,
     elevation: 4,
-    shadowOffset: {width: 0, height: 0},
+    shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.75,
     shadowRadius: 8,
   },
@@ -2538,19 +2716,18 @@ const styles = StyleSheet.create({
   },
   receiptActionBadge: {
     alignItems: 'center',
-    backgroundColor: 'rgba(184,233,114,0.14)',
-    borderColor: 'rgba(184,233,114,0.34)',
+    backgroundColor: ui.highlight,
     borderRadius: radii.pill,
-    borderWidth: 1,
-    height: 42,
+    height: 38,
     justifyContent: 'center',
-    width: 58,
+    marginRight: spacing.md,
+    width: 38,
   },
   receiptActionBadgeLabel: {
-    color: '#D6F4A9',
-    fontSize: 12,
+    color: palette.white,
+    fontSize: 11,
     fontWeight: '900',
-    letterSpacing: 0.7,
+    letterSpacing: 0.5,
   },
   receiptActionButtonDisabled: {
     opacity: 0.58,
@@ -2565,12 +2742,12 @@ const styles = StyleSheet.create({
     marginTop: spacing.lg,
   },
   receiptActionCard: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
+    backgroundColor: ui.darkSurface,
     borderColor: ui.darkBorder,
-    borderRadius: radii.lg,
+    borderRadius: 24,
     borderWidth: 1,
-    marginTop: spacing.lg,
-    padding: spacing.lg,
+    marginTop: spacing.xl,
+    padding: spacing.xl,
   },
   receiptActionEyebrow: {
     color: '#B8E972',
@@ -2588,7 +2765,7 @@ const styles = StyleSheet.create({
     color: ui.darkTextMuted,
     fontSize: 13,
     fontWeight: '700',
-    lineHeight: 20,
+    lineHeight: 18,
   },
   receiptActionTextWrap: {
     flex: 1,
@@ -2627,9 +2804,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     flex: 1,
     justifyContent: 'center',
-    minHeight: 48,
-    minWidth: 150,
-    paddingHorizontal: spacing.lg,
+    minHeight: 38,
+    minWidth: 120,
+    paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
   },
   receiptSecondaryButtonLabel: {
@@ -3640,5 +3817,43 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: spacing.md,
+  },
+  modalHeader: {
+    alignItems: 'center',
+    backgroundColor: palette.white,
+    borderBottomColor: palette.border,
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.md,
+  },
+  modalTitle: {
+    color: palette.textPrimary,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  modalCloseButton: {
+    backgroundColor: palette.background,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  modalCloseButtonLabel: {
+    color: palette.primaryStrong,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  loaderOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    justifyContent: 'center',
+  },
+  errorContainer: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+    padding: spacing.xl,
   },
 });
