@@ -81,6 +81,45 @@ interface BluetoothPrinterDevice {
   inner_mac_address: string;
 }
 
+const crc16xmodem = (data: Uint8Array): number => {
+  return data.reduce((crc: number, x: number) => {
+    crc ^= x << 8;
+    for (let i = 0; i < 8; i++) {
+      crc = crc & 0x8000 ? (crc << 1) ^ 0x1021 : crc << 1;
+    }
+    return crc & 0xffff;
+  }, 0);
+};
+
+const base64ToBytes = (base64: string): Uint8Array => {
+  const binaryString = ReactNativeBlobUtil.base64.decode(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+};
+
+const bytesToBase64 = (bytes: Uint8Array) => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let output = '';
+  let i = 0;
+  while (i < bytes.length) {
+    const byte1 = bytes[i++];
+    const byte2 = i < bytes.length ? bytes[i++] : NaN;
+    const byte3 = i < bytes.length ? bytes[i++] : NaN;
+    const enc1 = byte1 >> 2;
+    const enc2 = ((byte1 & 3) << 4) | (byte2 >> 4);
+    const enc3 = ((byte2 & 15) << 2) | (byte3 >> 6);
+    const enc4 = byte3 & 63;
+    output += chars.charAt(enc1);
+    output += chars.charAt(enc2);
+    output += Number.isNaN(byte2) ? '=' : chars.charAt(enc3);
+    output += Number.isNaN(byte3) ? '=' : chars.charAt(enc4);
+  }
+  return output;
+};
+
 const EARTH_RADIUS_KILOMETERS = 6371.0088;
 const CLOSE_DISTANCE_KILOMETERS = 16;
 const MEDIUM_DISTANCE_KILOMETERS = 40;
@@ -366,6 +405,53 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
   const connectedPrinterMacRef = useRef<string | null>(null);
   const bleManagerRef = useRef<BleManager | null>(null);
   const activeBleDeviceRef = useRef<any>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [printPreviewImage, setPrintPreviewImage] = useState<string | null>(null);
+  const [printPreviewLines, setPrintPreviewLines] = useState(0);
+  const [isPrintPreviewVisible, setIsPrintPreviewVisible] = useState(false);
+  const authRef = useRef<{
+    mac?: Uint8Array;
+    authBytes?: Uint8Array;
+    authCrc?: number[];
+  }>({});
+
+  const handleLXAuth = async (device: any, msg: Uint8Array) => {
+    if (msg[0] !== 0x5a) return;
+    const serviceUuid = "ffe6";
+    const sendCharUuid = "ffe1";
+    switch (msg[1]) {
+      case 0x01: {
+        authRef.current.mac = msg.slice(4, 10);
+        const authBytes = new Uint8Array(10);
+        for (let i = 0; i < 10; i++) authBytes[i] = Math.floor(Math.random() * 256);
+        authRef.current.authBytes = authBytes;
+        authRef.current.authCrc = Array.from(authBytes).map((x: number): number => {
+          const y = new Uint8Array(7);
+          y[0] = x;
+          y.set(authRef.current.mac || new Uint8Array(6), 1);
+          return crc16xmodem(y);
+        });
+        const newMsg = new Uint8Array([0x5a, 0x0a, ...authBytes]);
+        await device.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(newMsg));
+        break;
+      }
+      case 0x0a: {
+        if (!authRef.current.authCrc) return;
+        const newMsg = new Uint8Array([0x5a, 0x0b, ...authRef.current.authCrc.map((x) => x >> 8)]);
+        await device.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(newMsg));
+        break;
+      }
+      case 0x0b: {
+        if (msg[2] === 1) {
+          setIsAuthenticated(true);
+          setCheckoutFeedback({ message: 'Printer Authenticated and Ready!', tone: 'success' });
+        } else {
+          setIsAuthenticated(false);
+        }
+        break;
+      }
+    }
+  };
 
   const toBase64 = (str: string) => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
@@ -860,9 +946,9 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
     const permissions =
       androidApiLevel >= 31
         ? [
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-          ]
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        ]
         : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
 
     for (const permission of permissions) {
@@ -906,7 +992,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
         devices =
           ((await withTimeout(
             BLEPrinter.getDeviceList() as Promise<BluetoothPrinterDevice[]>,
-            12000,
+            5000,
             'Bluetooth scan timed out. Try again.',
           )) as BluetoothPrinterDevice[]) ?? [];
       } catch (scanError) {
@@ -964,7 +1050,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
       const timer = setTimeout(() => {
         bleManager.stopDeviceScan();
         resolve();
-      }, 9000);
+      }, 4000);
 
       bleManager.startDeviceScan(
         null,
@@ -986,7 +1072,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
             inner_mac_address: device.id,
           };
 
-        // Add every discovered BLE device; do not filter by name.
+          // Add every discovered BLE device; do not filter by name.
           if (!discoveredMap.has(device.id)) {
             discoveredMap.set(device.id, normalizedDevice);
           }
@@ -1055,20 +1141,49 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
     setConnectingDeviceMac(connectAddress);
     try {
       await ensureBlePrinterInitialized();
+      const normalizedTargetName = (device.device_name || '').trim().toLowerCase();
+      const normalizedTargetAddress = device.inner_mac_address.trim().toLowerCase();
+      const isLX = normalizedTargetName.startsWith('lx');
+
+      // Fast Path for LX Printers: Skip standard driver and go straight to GATT connection
+      if (isLX && bleManagerRef.current) {
+        console.log('LX Printer detected. Using fast-path connection.');
+        const bleDevice = await bleManagerRef.current.connectToDevice(connectAddress);
+        await bleDevice.discoverAllServicesAndCharacteristics();
+        activeBleDeviceRef.current = bleDevice;
+        connectedPrinterMacRef.current = connectAddress;
+        setSelectedBluetoothPrinterMac(connectAddress);
+
+        console.log('LX Printer detected. Starting handshake...');
+        bleDevice.monitorCharacteristicForService('ffe6', 'ffe2', (error: any, char: any) => {
+          if (error) return;
+          if (char?.value) handleLXAuth(bleDevice, base64ToBytes(char.value));
+        });
+        setTimeout(async () => {
+          try {
+            await bleDevice.writeCharacteristicWithoutResponseForService('ffe6', 'ffe1', bytesToBase64(new Uint8Array([0x5a, 0x01])));
+          } catch (e) { console.log('Auth start failed', e); }
+        }, 1000);
+
+        setPairedBluetoothDevices(currentDevices => {
+          const alreadyExists = currentDevices.some(d => d.inner_mac_address === connectAddress);
+          if (alreadyExists) return currentDevices;
+          return [...currentDevices, { device_name: device.device_name || 'LX Printer', inner_mac_address: connectAddress }];
+        });
+
+        setCheckoutFeedback({ message: `Connected to ${device.device_name || connectAddress}.`, tone: 'success' });
+        setIsBluetoothLoading(false);
+        setConnectingDeviceMac(null);
+        return;
+      }
+
+      // Standard Driver Path (For non-LX printers)
       let validPrinterDevices: BluetoothPrinterDevice[] = [];
       try {
         const availablePrinterDevices =
-          ((await BLEPrinter.getDeviceList()) as BluetoothPrinterDevice[]) ?? [];
-        validPrinterDevices = availablePrinterDevices.filter(
-          item => item.inner_mac_address,
-        );
-      } catch (ignoredError) {
-        // If there are 0 paired devices, getDeviceList throws 'No Device Found'.
-        // We can safely ignore this because we will attempt to connect via the MAC address directly.
-      }
-
-      const normalizedTargetName = (device.device_name || '').trim().toLowerCase();
-      const normalizedTargetAddress = device.inner_mac_address.trim().toLowerCase();
+          ((await withTimeout(BLEPrinter.getDeviceList() as Promise<BluetoothPrinterDevice[]>, 4000, 'Standard driver scan timed out.')) as BluetoothPrinterDevice[]) ?? [];
+        validPrinterDevices = availablePrinterDevices.filter(item => item.inner_mac_address);
+      } catch (ignoredError) {}
 
       const resolvedPrinterDevice =
         validPrinterDevices.find(
@@ -1083,9 +1198,9 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
           const currentName = (item.device_name || '').trim().toLowerCase();
           return Boolean(
             normalizedTargetName &&
-              currentName &&
-              (currentName.includes(normalizedTargetName) ||
-                normalizedTargetName.includes(currentName)),
+            currentName &&
+            (currentName.includes(normalizedTargetName) ||
+              normalizedTargetName.includes(currentName)),
           );
         });
 
@@ -1122,7 +1237,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
       connectedPrinterMacRef.current = null;
       activeBleDeviceRef.current = null;
       const errorMessage = String((error as any)?.message || error);
-      
+
       // Fallback: Try connecting via BLE GATT (for non-standard printers)
       if (bleManagerRef.current) {
         try {
@@ -1131,7 +1246,22 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
           activeBleDeviceRef.current = bleDevice;
           connectedPrinterMacRef.current = connectAddress;
           setSelectedBluetoothPrinterMac(connectAddress);
-          
+
+          // LX Handshake detection
+          const isLX = (device.device_name || '').toUpperCase().startsWith('LX');
+          if (isLX) {
+            console.log('LX Printer detected. Starting handshake...');
+            bleDevice.monitorCharacteristicForService('ffe6', 'ffe2', (error: any, char: any) => {
+              if (error) return;
+              if (char?.value) handleLXAuth(bleDevice, base64ToBytes(char.value));
+            });
+            setTimeout(async () => {
+              try {
+                await bleDevice.writeCharacteristicWithoutResponseForService('ffe6', 'ffe1', bytesToBase64(new Uint8Array([0x5a, 0x01])));
+              } catch (e) { console.log('Auth start failed', e); }
+            }, 1000);
+          }
+
           setPairedBluetoothDevices(currentDevices => {
             const alreadyExists = currentDevices.some(
               d => d.inner_mac_address === connectAddress,
@@ -1147,7 +1277,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
           });
 
           setCheckoutFeedback({
-            message: `Connected to ${device.device_name || connectAddress} via BLE fallback.`,
+            message: `Connected to ${device.device_name || connectAddress}.`,
             tone: 'success',
           });
           return;
@@ -1248,167 +1378,325 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
     };
   }, []);
 
+  const runPrinterTest = async (device: BluetoothPrinterDevice) => {
+    setIsBluetoothLoading(true);
+    setCheckoutFeedback({ message: `Starting test for ${device.device_name || device.inner_mac_address}...`, tone: 'info' });
+
+    try {
+      const mac = device.inner_mac_address;
+      let bleDevice = activeBleDeviceRef.current;
+
+      // 1. Connection attempt
+      if (connectedPrinterMacRef.current !== mac || !bleDevice) {
+        try {
+          await BLEPrinter.connectPrinter(mac);
+          connectedPrinterMacRef.current = mac;
+          activeBleDeviceRef.current = null;
+        } catch (err) {
+          if (bleManagerRef.current) {
+            bleDevice = await bleManagerRef.current.connectToDevice(mac);
+            await bleDevice.discoverAllServicesAndCharacteristics();
+            activeBleDeviceRef.current = bleDevice;
+            connectedPrinterMacRef.current = mac;
+            
+            // Trigger Auth if LX
+            if ((device.device_name || '').toUpperCase().startsWith('LX')) {
+               bleDevice.monitorCharacteristicForService('ffe6', 'ffe2', (error: any, char: any) => {
+                 if (!error && char?.value) handleLXAuth(bleDevice, base64ToBytes(char.value));
+               });
+               await new Promise<void>(r => setTimeout(() => r(), 1000));
+               await bleDevice.writeCharacteristicWithoutResponseForService('ffe6', 'ffe1', bytesToBase64(new Uint8Array([0x5a, 0x01])));
+               // Wait for auth to complete
+               await new Promise<void>(r => setTimeout(() => r(), 2000));
+            }
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      // 2. Printing attempt
+      if (activeBleDeviceRef.current && (device.device_name || '').toUpperCase().startsWith('LX')) {
+        console.log("Running Proprietary LX Print Test...");
+        const serviceUuid = "ffe6";
+        const sendCharUuid = "ffe1";
+        
+        // Start Command
+        await activeBleDeviceRef.current.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(new Uint8Array([0x5a, 0x04, 0x00, 0x02, 0x00, 0x00])));
+        await new Promise<void>(r => setTimeout(() => r(), 100));
+        
+        // Solid Black Line
+        const line = new Uint8Array(100);
+        line[0] = 0x55;
+        for (let i = 3; i < 99; i++) line[i] = 0xFF;
+        await activeBleDeviceRef.current.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(line));
+        await new Promise<void>(r => setTimeout(() => r(), 100));
+        
+        // End Command
+        const endLine = new Uint8Array(100);
+        endLine[0] = 0x55; endLine[2] = 0x01;
+        await activeBleDeviceRef.current.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(endLine));
+        
+        setCheckoutFeedback({ message: 'Proprietary LX test sent.', tone: 'success' });
+      } else if (activeBleDeviceRef.current) {
+        // ... existing generic BLE test code ...
+        const deviceObj = activeBleDeviceRef.current;
+        const services = await deviceObj.services();
+        const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(() => resolve(), ms));
+        await sleep(500);
+
+        const wakeUpBase64 = "AA==";
+        const testTextBase64 = "VEVTVAoK";
+        
+        let testSent = false;
+        for (const service of services) {
+          const chars = await service.characteristics();
+          for (const char of chars) {
+            if (char.isWritableWithResponse || char.isWritableWithoutResponse) {
+              try {
+                const writeToCharacteristic = async (valueBase64: string) => {
+                  if (char.isWritableWithoutResponse) await deviceObj.writeCharacteristicWithoutResponseForService(service.uuid, char.uuid, valueBase64);
+                  else await deviceObj.writeCharacteristicWithResponseForService(service.uuid, char.uuid, valueBase64);
+                };
+                await writeToCharacteristic(wakeUpBase64);
+                await sleep(200);
+                await writeToCharacteristic("G0A=");
+                await sleep(150);
+                await writeToCharacteristic(testTextBase64);
+                await sleep(150);
+                await writeToCharacteristic("CgoKCg==");
+                testSent = true;
+                break;
+              } catch (e) {}
+            }
+          }
+          if (testSent) break;
+        }
+        if (!testSent) throw new Error('No writable BLE characteristic accepted test data.');
+        setCheckoutFeedback({ message: 'Generic test command sent.', tone: 'success' });
+      } else {
+        await BLEPrinter.printBill("TEST PRINT FROM APP\nSUCCESS\n\n\n\n");
+        setCheckoutFeedback({ message: 'Test command sent via standard driver.', tone: 'success' });
+      }
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      setCheckoutFeedback({ message: `Test Failed: ${msg}`, tone: 'error' });
+    } finally {
+      setIsBluetoothLoading(false);
+    }
+  };
+
+  const handleLXPrintNow = async () => {
+    const data = (this as any)._pendingLXData;
+    if (!data || !activeBleDeviceRef.current) return;
+    
+    setIsPrintPreviewVisible(false);
+    setIsBluetoothLoading(true);
+    setCheckoutFeedback({ message: 'Sending to printer...', tone: 'info' });
+
+    try {
+      const { base64Data, totalLines } = data;
+      const rawData = base64ToBytes(base64Data);
+      const deviceObj = activeBleDeviceRef.current;
+      const serviceUuid = "ffe6";
+      const sendCharUuid = "ffe1";
+
+      console.log('--- LX PRINT PACKET LOG ---');
+      
+      // 1. Start Print Command
+      const startCmd = new Uint8Array([0x5a, 0x04, (totalLines + 1) >> 8, (totalLines + 1) & 0xff, 0x00, 0x00]);
+      console.log('START CMD (HEX):', Array.from(startCmd).map(b => b.toString(16).padStart(2, '0')).join(' '));
+      // await deviceObj.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(startCmd));
+      
+      // 2. Send Line Data
+      console.log(`Sending ${totalLines} data packets...`);
+      for (let i = 0; i < totalLines; i++) {
+        const line = new Uint8Array(100);
+        line[0] = 0x55;
+        line[1] = i >> 8;
+        line[2] = i & 0xff;
+        line.set(rawData.slice(i * 96, (i + 1) * 96), 3);
+        
+        // Log FULL hex for every line as requested
+        const hex = Array.from(line).map(b => b.toString(16).padStart(2, '0')).join('');
+        console.log(`L${i}: ${hex}`);
+        
+        // await deviceObj.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(line));
+      }
+
+      // 3. End Print Command
+      const endLine = new Uint8Array(100);
+      endLine[0] = 0x55;
+      endLine[1] = totalLines >> 8;
+      endLine[2] = totalLines & 0xff;
+      console.log('END CMD (HEX):', Array.from(endLine.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' '), '...');
+      // await deviceObj.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(endLine));
+
+      setCheckoutFeedback({ message: 'Packets logged to console!', tone: 'success' });
+    } catch (error) {
+      setCheckoutFeedback({ message: `Print failed: ${String(error)}`, tone: 'error' });
+    } finally {
+      setIsBluetoothLoading(false);
+    }
+  };
+
   const bluetoothPrintReceipt = async (
     billData?: any,
     selectedDevice?: BluetoothPrinterDevice,
   ) => {
     try {
       const bill = billData || latestStoredBill;
-      // Allow proceeding without a bill if we are doing a test (selectedDevice is provided)
-      if (!bill && !selectedDevice) return false;
+      if (!bill) return false;
 
       let targetDevice = selectedDevice;
-
       if (!targetDevice) {
-        const devices = await loadBluetoothDevices();
-        if (!devices) {
-          return false;
+        // First check paired devices in state to avoid slow scanning
+        targetDevice = pairedBluetoothDevices.find(d => d.inner_mac_address === selectedBluetoothPrinterMac) || 
+                       pairedBluetoothDevices.find(d => (d.device_name || '').toUpperCase().startsWith('LX'));
+        
+        // Only scan if absolutely necessary
+        if (!targetDevice) {
+          const devices = await loadBluetoothDevices();
+          if (devices && devices.length > 0) {
+            targetDevice = devices.find(d => d.inner_mac_address === selectedBluetoothPrinterMac) || devices[0];
+          }
         }
-        if (devices.length === 0) {
-          setCheckoutFeedback({
-            message: 'No paired bluetooth printers found. Please pair your device first.',
-            tone: 'error'
-          });
-          return false;
+      }
+      if (!targetDevice) return false;
+      const mac = targetDevice.inner_mac_address;
+      const isLX = (targetDevice.device_name || '').toUpperCase().startsWith('LX');
+
+      if (isLX) {
+        // Ensure connection first
+        if (connectedPrinterMacRef.current !== mac || !activeBleDeviceRef.current) {
+          if (bleManagerRef.current) {
+            const bleDevice = await bleManagerRef.current.connectToDevice(mac);
+            await bleDevice.discoverAllServicesAndCharacteristics();
+            activeBleDeviceRef.current = bleDevice;
+            connectedPrinterMacRef.current = mac;
+          }
         }
 
-        targetDevice =
-          devices.find(device => device.inner_mac_address === selectedBluetoothPrinterMac) ??
-          devices.find(
-            d =>
-              d.device_name?.toLowerCase().includes('printer') ||
-              d.device_name?.toLowerCase().includes('pos'),
-          ) ??
-          devices[0];
+        setCheckoutFeedback({ message: 'Rendering PDF...', tone: 'info' });
+        const renderResult = await pdfService.renderPdfForLXPrinter({
+          url: bill.url,
+          token: session.token,
+          fileName: bill.file_name
+        });
+
+        if (!renderResult.ok || !renderResult.data) {
+          throw new Error(renderResult.message || 'Failed to render PDF');
+        }
+
+        const { base64Data, totalLines } = renderResult.data;
+        const rawData = base64ToBytes(base64Data);
+        const deviceObj = activeBleDeviceRef.current;
+        const serviceUuid = "ffe6";
+        const sendCharUuid = "ffe1";
+
+        if (!deviceObj) throw new Error("Printer not connected");
+
+        setCheckoutFeedback({ message: `Printing ${totalLines} lines...`, tone: 'info' });
+
+        // 1. Start Print Command
+        const startCmd = new Uint8Array([0x5a, 0x04, (totalLines + 1) >> 8, (totalLines + 1) & 0xff, 0x00, 0x00]);
+        await deviceObj.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(startCmd));
+        await new Promise<void>(r => setTimeout(() => r(), 150));
+
+        // 2. Send Line Data
+        for (let i = 0; i < totalLines; i++) {
+          const line = new Uint8Array(100);
+          line[0] = 0x55;
+          line[1] = i >> 8;
+          line[2] = i & 0xff;
+          line.set(rawData.slice(i * 96, (i + 1) * 96), 3);
+          
+          await deviceObj.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(line));
+          if (i % 20 === 0) await new Promise<void>(r => setTimeout(() => r(), 25));
+        }
+
+        // 3. End Print Command
+        const endLine = new Uint8Array(100);
+        endLine[0] = 0x55;
+        endLine[1] = totalLines >> 8;
+        endLine[2] = totalLines & 0xff;
+        await deviceObj.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(endLine));
+
+        setCheckoutFeedback({ message: 'Print complete!', tone: 'success' });
+        return true;
       }
 
-      if (!targetDevice) return false;
-      setSelectedBluetoothPrinterMac(targetDevice.inner_mac_address);
-      setBluetoothStatusMessage(
-        `Connected device: ${targetDevice.device_name || targetDevice.inner_mac_address}`,
-      );
-
-      // Avoid reconnecting on every print; reconnect only when target changes.
-      if (connectedPrinterMacRef.current !== targetDevice.inner_mac_address) {
+      // Standard path connection logic (Only if not LX or if we decide to continue later)
+      if (connectedPrinterMacRef.current !== mac) {
         try {
-          await BLEPrinter.connectPrinter(targetDevice.inner_mac_address);
+          await BLEPrinter.connectPrinter(mac);
           activeBleDeviceRef.current = null;
         } catch (err) {
           if (bleManagerRef.current) {
-            const bleDevice = await bleManagerRef.current.connectToDevice(targetDevice.inner_mac_address);
+            const bleDevice = await bleManagerRef.current.connectToDevice(mac);
             await bleDevice.discoverAllServicesAndCharacteristics();
             activeBleDeviceRef.current = bleDevice;
           } else {
             throw err;
           }
         }
-        connectedPrinterMacRef.current = targetDevice.inner_mac_address;
+        connectedPrinterMacRef.current = mac;
       }
 
-      // Build text-based payload
-      let payload = "";
-      if (bill) {
-        payload = `<CB>SILVER EAGLE DISTRIBUTORS</CB>\n`;
-        payload += `<C>PO BOX 841521, DALLAS, TX 75284</C>\n`;
-        payload += `<C>Phone: 713-869-4361</C>\n`;
-        payload += `<L>--------------------------------</L>\n`;
-        payload += `<L>Invoice#: ${bill.order_number}</L>\n`;
-        payload += `<L>Customer: ${bill.customer_name}</L>\n`;
-        payload += `<L>Date: ${new Date().toLocaleString()}</L>\n`;
-        payload += `<L>--------------------------------</L>\n`;
-        payload += `<B>ITEM           QTY    PRICE</B>\n`;
-        
-        selectedProducts.forEach(p => {
-          const qty = selectedQuantities[p.id] || 0;
-          const price = (p.unitPrice * qty).toFixed(2);
-          const name = p.item_name.substring(0, 14).padEnd(14);
-          const qStr = qty.toString().padEnd(6);
-          payload += `<L>${name} ${qStr} $${price}</L>\n`;
-        });
+      // Generic Text Printing (for non-LX printers)
+      let payload = `<CB>SILVER EAGLE DISTRIBUTORS</CB>\n`;
+      payload += `<C>PO BOX 841521, DALLAS, TX 75284</C>\n`;
+      payload += `<C>Phone: 713-869-4361</C>\n`;
+      payload += `<L>--------------------------------</L>\n`;
+      payload += `<L>Invoice#: ${bill.order_number}</L>\n`;
+      payload += `<L>Customer: ${bill.customer_name}</L>\n`;
+      payload += `<L>Date: ${new Date().toLocaleString()}</L>\n`;
+      payload += `<L>--------------------------------</L>\n`;
+      payload += `<B>ITEM           QTY    PRICE</B>\n`;
 
-        payload += `<L>--------------------------------</L>\n`;
-        payload += `<R><B>TOTAL: $${totalPayable.toFixed(2)}</B></R>\n`;
-        payload += `\n\n<C>Thank you!</C>\n\n\n`;
-      } else {
-        payload = "TEST PRINT FROM APP\nSUCCESS\n\n\n\n";
-      }
+      selectedProducts.forEach(p => {
+        const qty = selectedQuantities[p.id] || 0;
+        const price = (p.unitPrice * qty).toFixed(2);
+        const name = p.item_name.substring(0, 14).padEnd(14);
+        const qStr = qty.toString().padEnd(6);
+        payload += `<L>${name} ${qStr} $${price}</L>\n`;
+      });
 
-      // If printer dropped while app was open, retry once after reconnect.
-      try {
-        if (activeBleDeviceRef.current) {
-          const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(() => resolve(), ms));
-          const device = activeBleDeviceRef.current;
-          
-          try {
-            // Request larger MTU for better performance on modern devices
-            if (Platform.OS === 'android') {
-              await device.requestMTU(512);
-              await sleep(200);
-            }
-          } catch (mtuError) {
-            console.log('MTU Request failed (normal for some devices):', mtuError);
-          }
+      payload += `<L>--------------------------------</L>\n`;
+      payload += `<R><B>TOTAL: $${totalPayable.toFixed(2)}</B></R>\n`;
+      payload += `\n\n<C>Thank you!</C>\n\n\n`;
 
-          const services = await device.services();
-          await sleep(500); // Let connection settle
-          let written = false;
+      if (activeBleDeviceRef.current) {
+        const deviceObj = activeBleDeviceRef.current;
+        const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(() => resolve(), ms));
+        const services = await deviceObj.services();
+        const cleanPayload = payload.replace(/<[^>]*>/g, '') + '\n\n\n';
+        const chunkSize = 20;
 
-          // Hardcoded "TEST\n\n\n\n\n" in base64 to eliminate encoding issues
-          const testBase64 = "VEVTVAoKAAoKAAoK"; 
-
-          for (const service of services) {
-            const chars = await service.characteristics();
-            for (const char of chars) {
-              if (char.isWritableWithResponse || char.isWritableWithoutResponse) {
-                console.log(`Force Write Attempt -> Service: ${service.uuid}, Char: ${char.uuid}`);
-                
-                try {
-                  if (char.isWritableWithoutResponse) {
-                    await device.writeCharacteristicWithoutResponseForService(
-                      service.uuid,
-                      char.uuid,
-                      testBase64
-                    );
-                  }
-                  
-                  if (char.isWritableWithResponse) {
-                    await device.writeCharacteristicWithResponseForService(
-                      service.uuid,
-                      char.uuid,
-                      testBase64
-                    );
-                  }
-                  written = true;
-                } catch (e) {
-                  console.log(`Write failed: ${char.uuid}`, e);
-                }
+        for (const service of services) {
+          const chars = await service.characteristics();
+          for (const char of chars) {
+            if (char.isWritableWithResponse || char.isWritableWithoutResponse) {
+              for (let i = 0; i < cleanPayload.length; i += chunkSize) {
+                const chunk = cleanPayload.substring(i, i + chunkSize);
+                const b64 = ReactNativeBlobUtil.base64.encode(chunk);
+                if (char.isWritableWithoutResponse) await deviceObj.writeCharacteristicWithoutResponseForService(service.uuid, char.uuid, b64);
+                else await deviceObj.writeCharacteristicWithResponseForService(service.uuid, char.uuid, b64);
                 await sleep(100);
               }
+              break;
             }
           }
-        } else {
-          await BLEPrinter.printBill(payload);
         }
-      } catch (printError) {
-        if (!activeBleDeviceRef.current) {
-          await BLEPrinter.connectPrinter(targetDevice.inner_mac_address);
-          connectedPrinterMacRef.current = targetDevice.inner_mac_address;
-          await BLEPrinter.printBill(payload);
-        } else {
-          throw printError;
-        }
+      } else {
+        await BLEPrinter.printBill(payload);
       }
-      
+
       return true;
     } catch (error: any) {
-      const rawError = error?.message || String(error) || 'Unknown Print Error';
-      console.log('BLE Print Error:', rawError);
+      console.log('Print Error:', error?.message || error);
       connectedPrinterMacRef.current = null;
-      
-      setCheckoutFeedback({
-        message: `Print Error: ${rawError}`,
-        tone: 'error'
-      });
+      setCheckoutFeedback({ message: `Print Error: ${error?.message || error}`, tone: 'error' });
       return false;
     }
   };
@@ -1440,7 +1728,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
 
   const openStoredReceipt = async () => {
     if (!latestStoredBill) return;
-    
+
     // Fallback to visual preview
     const base64 = await fetchPdfAsBase64(latestStoredBill.url);
     if (base64) {
@@ -1621,7 +1909,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
     if (!devices || devices.length === 0) {
       devices = (await loadBluetoothDevices()) || [];
     }
-    
+
     if (devices && devices.length > 1) {
       setPendingPrintBill(billData);
       setIsPrinterPickerVisible(true);
@@ -1692,6 +1980,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
 
         {checkoutFeedback ? (
           <InlineMessage
+            style={{ marginTop: 10 }}
             message={checkoutFeedback.message}
             tone={checkoutFeedback.tone}
           />
@@ -1736,7 +2025,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
                   </View>
                   <View style={styles.settingsDeviceActions}>
                     <Pressable
-                      onPress={() => bluetoothPrintReceipt(null, device)}
+                      onPress={() => runPrinterTest(device)}
                       style={({ pressed }) => [
                         styles.settingsDeviceActionButton,
                         pressed ? styles.settingsActionButtonPressed : null,
@@ -2919,7 +3208,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
                 <Pressable
                   key={device.inner_mac_address}
                   onPress={() => printWithSelectedDevice(device)}
-                  style={({pressed}) => [
+                  style={({ pressed }) => [
                     styles.categoryDropdownOption,
                     selectedBluetoothPrinterMac === device.inner_mac_address
                       ? styles.categoryDropdownOptionActive
@@ -2941,7 +3230,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
 
             <Pressable
               onPress={() => setIsPrinterPickerVisible(false)}
-              style={({pressed}) => [
+              style={({ pressed }) => [
                 styles.categoryDropdownCloseButton,
                 pressed ? styles.categoryDropdownCloseButtonPressed : null,
               ]}>
@@ -2969,7 +3258,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
           <View style={styles.utilityActions}>
             <Pressable
               onPress={() => setView('settings')}
-              style={({pressed}) => [
+              style={({ pressed }) => [
                 styles.settingsIconButton,
                 pressed ? styles.settingsIconButtonPressed : null,
               ]}>
@@ -3001,7 +3290,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
         <SafeAreaView style={styles.settingsScannerScreen}>
           <View style={[styles.categoryDropdownCard, categoryDropdownCardStyle]}>
             <Text style={styles.categoryDropdownEyebrow}>Add Device</Text>
-            <Text style={styles.categoryDropdownTitle}>Connect Printer In-App</Text>
+            <Text style={styles.categoryDropdownTitle}>Connect Printer</Text>
             <Text style={styles.categoryDropdownSubtitle}>
               Select a discovered printer to connect without leaving the app.
             </Text>
@@ -3057,7 +3346,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
                 ))
               ) : (
                 <Text style={styles.settingsStatusValue}>
-                  No in-app devices found yet. Make sure Bluetooth is ON, printer is close, then tap Rescan.
+                  No devices found yet. Make sure Bluetooth is ON, printer is close, then tap Rescan.
                 </Text>
               )}
             </ScrollView>

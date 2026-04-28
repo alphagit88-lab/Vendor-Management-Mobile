@@ -4,11 +4,16 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.ContentValues
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
+import android.graphics.pdf.PdfRenderer
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -134,6 +139,126 @@ class OrderPdfModule(reactContext: ReactApplicationContext) :
         }
       } catch (error: Exception) {
         promise.reject("PDF_PRINT_ERROR", error.message, error)
+      }
+    }.start()
+  }
+
+  @ReactMethod
+  fun renderPdfForGrayscalePrinter(payload: ReadableMap, promise: Promise) {
+    Thread {
+      try {
+        val remotePdfRequest = payload.toRemotePdfRequest()
+        val file = downloadPdfToCache(remotePdfRequest)
+        val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        val renderer = PdfRenderer(pfd)
+
+        val targetWidth = 320 // 40 bytes - Safe width for all 58mm printers to avoid cropping
+        val internalPadding = 0
+        val totalLines = mutableListOf<ByteArray>()
+        
+        // For preview
+        var previewBitmap: Bitmap? = null
+        var previewCanvas: Canvas? = null
+        var previewY = 0f
+
+        for (i in 0 until renderer.pageCount) {
+          val page = renderer.openPage(i)
+          val aspectRatio = page.height.toFloat() / page.width.toFloat()
+          val targetHeight = (targetWidth * aspectRatio).toInt()
+
+          val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+          val canvas = Canvas(bitmap)
+          canvas.drawColor(Color.WHITE)
+          
+          // Use full width destRect to match lxprint
+          val destRect = Rect(0, 0, targetWidth, targetHeight)
+          page.render(bitmap, destRect, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+          
+          // Add to preview
+          if (previewBitmap == null) {
+              // Create a tall bitmap for all pages
+              previewBitmap = Bitmap.createBitmap(targetWidth, targetHeight * renderer.pageCount, Bitmap.Config.ARGB_8888)
+              previewCanvas = Canvas(previewBitmap!!)
+              previewCanvas.drawColor(Color.WHITE)
+          }
+          previewCanvas?.drawBitmap(bitmap, 0f, previewY, null)
+          previewY += targetHeight
+
+          // Convert bitmap to 1bpp (96 bytes per line)
+          for (y in 0 until targetHeight) {
+            val lineBytes = ByteArray(96)
+            for (x in 0 until targetWidth) {
+              val pixel = bitmap.getPixel(x, y)
+              val gray = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3
+              if (gray < 200) {
+                val byteIdx = x / 8
+                val bitIdx = 7 - (x % 8)
+                lineBytes[byteIdx] = (lineBytes[byteIdx].toInt() or (1 shl bitIdx)).toByte()
+              }
+            }
+            totalLines.add(lineBytes)
+          }
+          bitmap.recycle()
+          page.close()
+        }
+
+        renderer.close()
+        pfd.close()
+
+        // White-space trimming: Find the last line that has at least one black pixel
+        var lastContentLine = totalLines.size
+        for (i in totalLines.size - 1 downTo 0) {
+            val line = totalLines[i]
+            var hasContent = false
+            for (b in line) {
+                if (b.toInt() != 0) {
+                    hasContent = true
+                    break
+                }
+            }
+            if (hasContent) {
+                lastContentLine = i + 1
+                break
+            }
+        }
+        
+        // Add a small 10px buffer at the bottom
+        val finalLineCount = Math.min(totalLines.size, lastContentLine + 10)
+        val trimmedLines = totalLines.subList(0, finalLineCount)
+
+        val flatBytes = ByteArray(trimmedLines.size * 96)
+        var offset = 0
+        for (line in trimmedLines) {
+          System.arraycopy(line, 0, flatBytes, offset, 96)
+          offset += 96
+        }
+        
+        // Generate PNG preview base64
+        val previewBase64 = previewBitmap?.let {
+            // Trim the preview bitmap too
+            val trimmedPreview = if (finalLineCount < it.height) {
+                Bitmap.createBitmap(it, 0, 0, it.width, finalLineCount)
+            } else {
+                it
+            }
+            val stream = ByteArrayOutputStream()
+            trimmedPreview.compress(Bitmap.CompressFormat.PNG, 100, stream)
+            val bytes = stream.toByteArray()
+            if (trimmedPreview != it) trimmedPreview.recycle()
+            it.recycle()
+            android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        } ?: ""
+
+        val result = Arguments.createMap().apply {
+          putString("base64Data", android.util.Base64.encodeToString(flatBytes, android.util.Base64.NO_WRAP))
+          putString("previewBase64", previewBase64)
+          putInt("widthBytes", 96)
+          putInt("totalLines", trimmedLines.size)
+        }
+
+        promise.resolve(result)
+      } catch (error: Exception) {
+        promise.reject("PDF_RENDER_ERROR", error.message, error)
       }
     }.start()
   }

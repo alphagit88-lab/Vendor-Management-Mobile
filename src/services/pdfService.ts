@@ -16,6 +16,9 @@ interface OrderPdfNativeModule {
   printPdfFromUrl(
     payload: StoredBillActionRequest,
   ): Promise<StoredBillActionResult>;
+  renderPdfForGrayscalePrinter(
+    payload: StoredBillActionRequest,
+  ): Promise<{ base64Data: string; previewBase64: string; widthBytes: number; totalLines: number }>;
 }
 
 const {OrderPdfModule} = NativeModules as {
@@ -104,6 +107,30 @@ export const pdfService = {
       return {
         ok: false,
         message: getErrorMessage(error) || 'Unable to print the receipt.',
+      };
+    }
+  },
+
+  async renderPdfForLXPrinter(
+    request: StoredBillActionRequest,
+  ): Promise<ServiceResult<{ base64Data: string; previewBase64: string; widthBytes: number; totalLines: number }>> {
+    if (!OrderPdfModule?.renderPdfForGrayscalePrinter) {
+      return {
+        ok: false,
+        message: 'LX PDF rendering is not available in this app build yet.',
+      };
+    }
+
+    try {
+      const data = await OrderPdfModule.renderPdfForGrayscalePrinter(request);
+      return {
+        ok: true,
+        data,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: getErrorMessage(error) || 'Unable to render the receipt for LX printer.',
       };
     }
   },
