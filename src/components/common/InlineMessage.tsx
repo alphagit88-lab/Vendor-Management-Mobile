@@ -1,5 +1,5 @@
 import React from 'react';
-import {StyleSheet, Text, View} from 'react-native';
+import {StyleProp, StyleSheet, Text, View, ViewStyle} from 'react-native';
 
 import {palette} from '../../theme/colors';
 import {radii} from '../../theme/shape';
@@ -10,6 +10,7 @@ type MessageTone = 'error' | 'info' | 'success';
 interface InlineMessageProps {
   message: string;
   tone?: MessageTone;
+  style?: StyleProp<ViewStyle>;
 }
 
 const toneStyles = {
@@ -33,6 +34,7 @@ const toneStyles = {
 export const InlineMessage = ({
   message,
   tone = 'error',
+  style,
 }: InlineMessageProps) => {
   const selectedTone = toneStyles[tone];
 
@@ -44,6 +46,7 @@ export const InlineMessage = ({
           backgroundColor: selectedTone.backgroundColor,
           borderColor: selectedTone.borderColor,
         },
+        style,
       ]}>
       <Text style={[styles.message, {color: selectedTone.textColor}]}>
         {message}

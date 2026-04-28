@@ -5,6 +5,7 @@ import Geolocation, {
 } from '@react-native-community/geolocation';
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Modal,
   PermissionsAndroid,
@@ -17,11 +18,12 @@ import {
   TextInput,
   View,
   useWindowDimensions,
-  Linking,
 } from 'react-native';
 import Pdf from 'react-native-pdf';
 import RNPrint from 'react-native-print';
+import ReactNativeBlobUtil from 'react-native-blob-util';
 import { BLEPrinter } from '@haroldtran/react-native-thermal-printer';
+import { BleManager } from 'react-native-ble-plx';
 
 import { InlineMessage } from '../components/common/InlineMessage';
 import { ScreenContainer } from '../components/common/ScreenContainer';
@@ -46,7 +48,7 @@ import {
   StoredOrderBill,
 } from '../types/order';
 
-type HomeView = 'home' | 'customers' | 'products';
+type HomeView = 'home' | 'customers' | 'products' | 'settings';
 type LoadStatus = 'idle' | ContentLoadState;
 type CheckoutState = 'idle' | 'loading';
 type FeedbackTone = 'error' | 'info' | 'success';
@@ -72,6 +74,11 @@ interface DistanceSignal {
   glowColor: string;
   label: string;
   lightColor: string;
+}
+
+interface BluetoothPrinterDevice {
+  device_name?: string;
+  inner_mac_address: string;
 }
 
 const EARTH_RADIUS_KILOMETERS = 6371.0088;
@@ -122,6 +129,18 @@ const formatReceiptTimestamp = (value: string) => {
     month: 'short',
   })}`;
 };
+const withTimeout = async <T,>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+) =>
+  Promise.race<T>([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    }),
+  ]);
+
 const getLocationErrorMessage = (error: unknown) => {
   if (!error || typeof error !== 'object') {
     return 'We could not determine your current location. Showing customers without distance sorting.';
@@ -319,6 +338,53 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
   const [isPdfLoading, setIsPdfLoading] = useState(false);
   const [receiptActionState, setReceiptActionState] =
     useState<ReceiptActionState>('idle');
+  const [bluetoothStatusMessage, setBluetoothStatusMessage] = useState(
+    'Bluetooth status not checked yet.',
+  );
+  const [pairedBluetoothDevices, setPairedBluetoothDevices] = useState<
+    BluetoothPrinterDevice[]
+  >([]);
+  const [discoveredBluetoothDevices, setDiscoveredBluetoothDevices] = useState<
+    BluetoothPrinterDevice[]
+  >([]);
+  const [selectedBluetoothPrinterMac, setSelectedBluetoothPrinterMac] =
+    useState<string | null>(null);
+  const [isBluetoothLoading, setIsBluetoothLoading] = useState(false);
+  const [isPrinterPickerVisible, setIsPrinterPickerVisible] = useState(false);
+  const [isAddDeviceModalVisible, setIsAddDeviceModalVisible] = useState(false);
+  const [isAddDeviceLoading, setIsAddDeviceLoading] = useState(false);
+  const [isAddDeviceOpening, setIsAddDeviceOpening] = useState(false);
+  const [addDeviceLastError, setAddDeviceLastError] = useState<string | null>(null);
+  const [addDeviceScanMessage, setAddDeviceScanMessage] = useState(
+    'Tap Add Device to scan.',
+  );
+  const [connectingDeviceMac, setConnectingDeviceMac] = useState<string | null>(
+    null,
+  );
+  const [pendingPrintBill, setPendingPrintBill] = useState<any>(null);
+  const isBlePrinterInitializedRef = useRef(false);
+  const connectedPrinterMacRef = useRef<string | null>(null);
+  const bleManagerRef = useRef<BleManager | null>(null);
+  const activeBleDeviceRef = useRef<any>(null);
+
+  const toBase64 = (str: string) => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+    let output = '';
+    for (
+      let block = 0, charCode, i = 0, map = chars;
+      str.charAt(i | 0) || (map = '=', i % 1);
+      output += map.charAt(63 & (block >> (8 - (i % 1) * 8)))
+    ) {
+      charCode = str.charCodeAt((i += 3 / 4));
+      if (charCode > 0xff) {
+        throw new Error(
+          "'btoa' failed: The string to be encoded contains characters outside of the Latin1 range.",
+        );
+      }
+      block = (block << 8) | charCode;
+    }
+    return output;
+  };
 
   useEffect(() => {
     if (checkoutFeedback) {
@@ -776,83 +842,568 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
     // EscPosPrinter setup if needed
   }, []);
 
-  const bluetoothPrintReceipt = async (billData?: any) => {
+  const ensureBlePrinterInitialized = async () => {
+    if (isBlePrinterInitializedRef.current) {
+      return;
+    }
+
+    await BLEPrinter.init();
+    isBlePrinterInitializedRef.current = true;
+  };
+
+  const requestBluetoothPermissions = async () => {
+    if (Platform.OS !== 'android') {
+      return true;
+    }
+
+    const androidApiLevel = Number(Platform.Version);
+    const permissions =
+      androidApiLevel >= 31
+        ? [
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          ]
+        : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
+
+    for (const permission of permissions) {
+      const hasPermission = await PermissionsAndroid.check(permission);
+      if (hasPermission) {
+        continue;
+      }
+
+      const status = await PermissionsAndroid.request(permission);
+      if (status !== PermissionsAndroid.RESULTS.GRANTED) {
+        return false;
+      }
+    }
+
+    return true;
+  };
+
+  const loadBluetoothDevices = async () => {
+    try {
+      const hasPermissions = await withTimeout(
+        requestBluetoothPermissions(),
+        8000,
+        'Permission request timed out.',
+      );
+      if (!hasPermissions) {
+        setBluetoothStatusMessage('Bluetooth permission denied.');
+        setCheckoutFeedback({
+          message: 'Bluetooth permissions are required to print.',
+          tone: 'error',
+        });
+        return null;
+      }
+
+      await withTimeout(
+        ensureBlePrinterInitialized(),
+        8000,
+        'Bluetooth initialization timed out.',
+      );
+      let devices: BluetoothPrinterDevice[] = [];
+      try {
+        devices =
+          ((await withTimeout(
+            BLEPrinter.getDeviceList() as Promise<BluetoothPrinterDevice[]>,
+            12000,
+            'Bluetooth scan timed out. Try again.',
+          )) as BluetoothPrinterDevice[]) ?? [];
+      } catch (scanError) {
+        const scanErrorMessage = String(
+          (scanError as any)?.message || scanError || '',
+        ).toLowerCase();
+        if (
+          scanErrorMessage.includes('no device found') ||
+          scanErrorMessage.includes('not found')
+        ) {
+          devices = [];
+        } else {
+          throw scanError;
+        }
+      }
+      const validDevices = devices.filter(device => device.inner_mac_address);
+
+      setPairedBluetoothDevices(validDevices);
+      if (!validDevices.length) {
+        setBluetoothStatusMessage(
+          'No discoverable Bluetooth printers found. Keep printer ON and retry scan.',
+        );
+        return [];
+      }
+
+      const selectedStillAvailable = validDevices.find(
+        device => device.inner_mac_address === selectedBluetoothPrinterMac,
+      );
+      if (!selectedStillAvailable) {
+        setSelectedBluetoothPrinterMac(validDevices[0].inner_mac_address);
+      }
+
+      const deviceCount = validDevices.length;
+      setBluetoothStatusMessage(
+        `${deviceCount} device${deviceCount === 1 ? '' : 's'} found.`,
+      );
+
+      return validDevices;
+    } catch (error) {
+      setBluetoothStatusMessage(
+        `Bluetooth scan failed: ${String((error as any)?.message || error)}`,
+      );
+      return null;
+    }
+  };
+
+  const scanDevicesWithBlePlx = async () => {
+    if (!bleManagerRef.current) {
+      bleManagerRef.current = new BleManager();
+    }
+    const bleManager = bleManagerRef.current;
+
+    const discoveredMap = new Map<string, BluetoothPrinterDevice>();
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        bleManager.stopDeviceScan();
+        resolve();
+      }, 9000);
+
+      bleManager.startDeviceScan(
+        null,
+        null,
+        (error, device) => {
+          if (error) {
+            clearTimeout(timer);
+            bleManager.stopDeviceScan();
+            reject(error);
+            return;
+          }
+
+          if (!device?.id) {
+            return;
+          }
+
+          const normalizedDevice: BluetoothPrinterDevice = {
+            device_name: device.name || device.localName || undefined,
+            inner_mac_address: device.id,
+          };
+
+        // Add every discovered BLE device; do not filter by name.
+          if (!discoveredMap.has(device.id)) {
+            discoveredMap.set(device.id, normalizedDevice);
+          }
+        },
+      );
+    });
+
+    return Array.from(discoveredMap.values());
+  };
+
+  const refreshBluetoothStatus = async () => {
+    setIsBluetoothLoading(true);
+    try {
+      await loadBluetoothDevices();
+    } catch (error) {
+      setBluetoothStatusMessage(
+        `Bluetooth status unavailable: ${String((error as any)?.message || error)}`,
+      );
+    } finally {
+      setIsBluetoothLoading(false);
+    }
+  };
+
+  const scanAvailableBluetoothDevices = async () => {
+    setIsAddDeviceLoading(true);
+    setAddDeviceLastError(null);
+    setAddDeviceScanMessage('Scanning nearby devices...');
+    setDiscoveredBluetoothDevices([]);
+    try {
+      await requestBluetoothPermissions();
+      const discoveredDevices = await scanDevicesWithBlePlx();
+      setDiscoveredBluetoothDevices(discoveredDevices);
+      setAddDeviceScanMessage(
+        discoveredDevices.length
+          ? `Found ${discoveredDevices.length} device${discoveredDevices.length === 1 ? '' : 's'}.`
+          : 'No device found. Tap Rescan.',
+      );
+    } catch (error) {
+      const message = String((error as any)?.message || error);
+      setAddDeviceLastError(message);
+      setAddDeviceScanMessage('Scan failed. Tap Rescan.');
+    } finally {
+      setIsAddDeviceLoading(false);
+    }
+  };
+
+  const openAddDeviceModal = async () => {
+    if (isAddDeviceOpening) {
+      return;
+    }
+    setIsAddDeviceOpening(true);
+    setCheckoutFeedback({
+      message: 'Opening device scanner...',
+      tone: 'info',
+    });
+    setIsAddDeviceModalVisible(true);
+    setDiscoveredBluetoothDevices([]);
+    setAddDeviceScanMessage('Opening scanner...');
+    scanAvailableBluetoothDevices();
+    setIsAddDeviceOpening(false);
+  };
+
+  const connectBluetoothDevice = async (device: BluetoothPrinterDevice) => {
+    const connectAddress = device.inner_mac_address;
+    setIsBluetoothLoading(true);
+    setConnectingDeviceMac(connectAddress);
+    try {
+      await ensureBlePrinterInitialized();
+      let validPrinterDevices: BluetoothPrinterDevice[] = [];
+      try {
+        const availablePrinterDevices =
+          ((await BLEPrinter.getDeviceList()) as BluetoothPrinterDevice[]) ?? [];
+        validPrinterDevices = availablePrinterDevices.filter(
+          item => item.inner_mac_address,
+        );
+      } catch (ignoredError) {
+        // If there are 0 paired devices, getDeviceList throws 'No Device Found'.
+        // We can safely ignore this because we will attempt to connect via the MAC address directly.
+      }
+
+      const normalizedTargetName = (device.device_name || '').trim().toLowerCase();
+      const normalizedTargetAddress = device.inner_mac_address.trim().toLowerCase();
+
+      const resolvedPrinterDevice =
+        validPrinterDevices.find(
+          item =>
+            item.inner_mac_address.trim().toLowerCase() === normalizedTargetAddress,
+        ) ||
+        validPrinterDevices.find(item => {
+          const currentName = (item.device_name || '').trim().toLowerCase();
+          return Boolean(normalizedTargetName && currentName === normalizedTargetName);
+        }) ||
+        validPrinterDevices.find(item => {
+          const currentName = (item.device_name || '').trim().toLowerCase();
+          return Boolean(
+            normalizedTargetName &&
+              currentName &&
+              (currentName.includes(normalizedTargetName) ||
+                normalizedTargetName.includes(currentName)),
+          );
+        });
+
+
+
+      await BLEPrinter.connectPrinter(connectAddress);
+      connectedPrinterMacRef.current = connectAddress;
+      setSelectedBluetoothPrinterMac(connectAddress);
+      setPairedBluetoothDevices(currentDevices => {
+        const alreadyExists = currentDevices.some(
+          currentDevice =>
+            currentDevice.inner_mac_address === connectAddress,
+        );
+        if (alreadyExists) {
+          return currentDevices;
+        }
+        return [
+          ...currentDevices,
+          {
+            device_name:
+              resolvedPrinterDevice?.device_name || device.device_name || 'Printer',
+            inner_mac_address: connectAddress,
+          },
+        ];
+      });
+      setBluetoothStatusMessage(
+        `Connected device: ${resolvedPrinterDevice?.device_name || device.device_name || connectAddress}`,
+      );
+      setCheckoutFeedback({
+        message: `Connected to ${resolvedPrinterDevice?.device_name || device.device_name || connectAddress}.`,
+        tone: 'success',
+      });
+    } catch (error) {
+      connectedPrinterMacRef.current = null;
+      activeBleDeviceRef.current = null;
+      const errorMessage = String((error as any)?.message || error);
+      
+      // Fallback: Try connecting via BLE GATT (for non-standard printers)
+      if (bleManagerRef.current) {
+        try {
+          const bleDevice = await bleManagerRef.current.connectToDevice(connectAddress);
+          await bleDevice.discoverAllServicesAndCharacteristics();
+          activeBleDeviceRef.current = bleDevice;
+          connectedPrinterMacRef.current = connectAddress;
+          setSelectedBluetoothPrinterMac(connectAddress);
+          
+          setPairedBluetoothDevices(currentDevices => {
+            const alreadyExists = currentDevices.some(
+              d => d.inner_mac_address === connectAddress,
+            );
+            if (alreadyExists) return currentDevices;
+            return [
+              ...currentDevices,
+              {
+                device_name: device.device_name || 'BLE Printer',
+                inner_mac_address: connectAddress,
+              },
+            ];
+          });
+
+          setCheckoutFeedback({
+            message: `Connected to ${device.device_name || connectAddress} via BLE fallback.`,
+            tone: 'success',
+          });
+          return;
+        } catch (bleError) {
+          console.log('BLE Fallback failed:', bleError);
+        }
+      }
+
+      Alert.alert('Connection Failed', `Unable to connect: ${errorMessage}`);
+      setCheckoutFeedback({
+        message: `Unable to connect device: ${errorMessage}`,
+        tone: 'error',
+      });
+    } finally {
+      setIsBluetoothLoading(false);
+      setConnectingDeviceMac(null);
+    }
+  };
+
+  const disconnectBluetoothDevice = async () => {
+    setIsBluetoothLoading(true);
+    try {
+      const blePrinterApi = BLEPrinter as unknown as {
+        disconnectPrinter?: (mac?: string) => Promise<void>;
+        closeConn?: () => Promise<void>;
+        closePrinterConn?: () => Promise<void>;
+      };
+
+      if (typeof blePrinterApi.disconnectPrinter === 'function') {
+        await blePrinterApi.disconnectPrinter(connectedPrinterMacRef.current || undefined);
+      } else if (typeof blePrinterApi.closeConn === 'function') {
+        await blePrinterApi.closeConn();
+      } else if (typeof blePrinterApi.closePrinterConn === 'function') {
+        await blePrinterApi.closePrinterConn();
+      }
+
+      connectedPrinterMacRef.current = null;
+      setBluetoothStatusMessage('Printer disconnected.');
+      setCheckoutFeedback({
+        message: 'Printer disconnected.',
+        tone: 'info',
+      });
+    } catch (error) {
+      setCheckoutFeedback({
+        message: `Unable to disconnect device: ${String((error as any)?.message || error)}`,
+        tone: 'error',
+      });
+    } finally {
+      setIsBluetoothLoading(false);
+    }
+  };
+
+  const removeBluetoothDevice = (device: BluetoothPrinterDevice) => {
+    Alert.alert(
+      'Remove device',
+      `Remove ${device.device_name || device.inner_mac_address} from app device list?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            const removedConnectedDevice =
+              connectedPrinterMacRef.current === device.inner_mac_address;
+            if (removedConnectedDevice) {
+              await disconnectBluetoothDevice();
+            }
+
+            setPairedBluetoothDevices(currentDevices =>
+              currentDevices.filter(
+                currentDevice =>
+                  currentDevice.inner_mac_address !== device.inner_mac_address,
+              ),
+            );
+
+            if (selectedBluetoothPrinterMac === device.inner_mac_address) {
+              setSelectedBluetoothPrinterMac(null);
+            }
+
+            setBluetoothStatusMessage(
+              `${device.device_name || device.inner_mac_address} removed from app list.`,
+            );
+          },
+        },
+      ],
+    );
+  };
+
+  useEffect(() => {
+    // Load initial status silently to avoid "infinite loading" UX on app open.
+    loadBluetoothDevices().catch(() => {
+      // Errors are already surfaced inside loadBluetoothDevices.
+    });
+
+    return () => {
+      bleManagerRef.current?.destroy();
+      bleManagerRef.current = null;
+    };
+  }, []);
+
+  const bluetoothPrintReceipt = async (
+    billData?: any,
+    selectedDevice?: BluetoothPrinterDevice,
+  ) => {
     try {
       const bill = billData || latestStoredBill;
-      if (!bill) return false;
+      // Allow proceeding without a bill if we are doing a test (selectedDevice is provided)
+      if (!bill && !selectedDevice) return false;
 
-      // Request Runtime Permissions for Android 12+
-      if (Platform.OS === 'android') {
-        const permissions = [
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-        ];
-        
-        const granted = await PermissionsAndroid.requestMultiple(permissions);
-        const allGranted = Object.values(granted).every(status => status === PermissionsAndroid.RESULTS.GRANTED);
-        
-        if (!allGranted) {
+      let targetDevice = selectedDevice;
+
+      if (!targetDevice) {
+        const devices = await loadBluetoothDevices();
+        if (!devices) {
+          return false;
+        }
+        if (devices.length === 0) {
           setCheckoutFeedback({
-            message: 'Bluetooth permissions are required to print.',
+            message: 'No paired bluetooth printers found. Please pair your device first.',
             tone: 'error'
           });
           return false;
         }
+
+        targetDevice =
+          devices.find(device => device.inner_mac_address === selectedBluetoothPrinterMac) ??
+          devices.find(
+            d =>
+              d.device_name?.toLowerCase().includes('printer') ||
+              d.device_name?.toLowerCase().includes('pos'),
+          ) ??
+          devices[0];
       }
 
-      // Initialize the Bluetooth driver
-      await BLEPrinter.init();
-      
-      // Get list of paired devices
-      const devices = await BLEPrinter.getDeviceList();
-      if (!devices || devices.length === 0) {
-        setCheckoutFeedback({
-          message: 'No paired bluetooth printers found. Please pair your device first.',
-          tone: 'error'
-        });
-        return false;
+      if (!targetDevice) return false;
+      setSelectedBluetoothPrinterMac(targetDevice.inner_mac_address);
+      setBluetoothStatusMessage(
+        `Connected device: ${targetDevice.device_name || targetDevice.inner_mac_address}`,
+      );
+
+      // Avoid reconnecting on every print; reconnect only when target changes.
+      if (connectedPrinterMacRef.current !== targetDevice.inner_mac_address) {
+        try {
+          await BLEPrinter.connectPrinter(targetDevice.inner_mac_address);
+          activeBleDeviceRef.current = null;
+        } catch (err) {
+          if (bleManagerRef.current) {
+            const bleDevice = await bleManagerRef.current.connectToDevice(targetDevice.inner_mac_address);
+            await bleDevice.discoverAllServicesAndCharacteristics();
+            activeBleDeviceRef.current = bleDevice;
+          } else {
+            throw err;
+          }
+        }
+        connectedPrinterMacRef.current = targetDevice.inner_mac_address;
       }
-
-      // Auto-select first printer or one with 'printer' in name
-      const targetDevice = devices.find(d => 
-        d.device_name?.toLowerCase().includes('printer') || 
-        d.device_name?.toLowerCase().includes('pos')
-      ) || devices[0];
-
-      // Connect to the printer
-      await BLEPrinter.connectPrinter(targetDevice.inner_mac_address);
 
       // Build text-based payload
-      let payload = `<CB>SILVER EAGLE DISTRIBUTORS</CB>\n`;
-      payload += `<C>PO BOX 841521, DALLAS, TX 75284</C>\n`;
-      payload += `<C>Phone: 713-869-4361</C>\n`;
-      payload += `<L>--------------------------------</L>\n`;
-      payload += `<L>Invoice#: ${bill.order_number}</L>\n`;
-      payload += `<L>Customer: ${bill.customer_name}</L>\n`;
-      payload += `<L>Date: ${new Date().toLocaleString()}</L>\n`;
-      payload += `<L>--------------------------------</L>\n`;
-      payload += `<B>ITEM           QTY    PRICE</B>\n`;
-      
-      selectedProducts.forEach(p => {
-        const qty = selectedQuantities[p.id] || 0;
-        const price = (p.unitPrice * qty).toFixed(2);
-        const name = p.item_name.substring(0, 14).padEnd(14);
-        const qStr = qty.toString().padEnd(6);
-        payload += `<L>${name} ${qStr} $${price}</L>\n`;
-      });
+      let payload = "";
+      if (bill) {
+        payload = `<CB>SILVER EAGLE DISTRIBUTORS</CB>\n`;
+        payload += `<C>PO BOX 841521, DALLAS, TX 75284</C>\n`;
+        payload += `<C>Phone: 713-869-4361</C>\n`;
+        payload += `<L>--------------------------------</L>\n`;
+        payload += `<L>Invoice#: ${bill.order_number}</L>\n`;
+        payload += `<L>Customer: ${bill.customer_name}</L>\n`;
+        payload += `<L>Date: ${new Date().toLocaleString()}</L>\n`;
+        payload += `<L>--------------------------------</L>\n`;
+        payload += `<B>ITEM           QTY    PRICE</B>\n`;
+        
+        selectedProducts.forEach(p => {
+          const qty = selectedQuantities[p.id] || 0;
+          const price = (p.unitPrice * qty).toFixed(2);
+          const name = p.item_name.substring(0, 14).padEnd(14);
+          const qStr = qty.toString().padEnd(6);
+          payload += `<L>${name} ${qStr} $${price}</L>\n`;
+        });
 
-      payload += `<L>--------------------------------</L>\n`;
-      payload += `<R><B>TOTAL: $${totalPayable.toFixed(2)}</B></R>\n`;
-      payload += `\n\n<C>Thank you!</C>\n\n\n`;
+        payload += `<L>--------------------------------</L>\n`;
+        payload += `<R><B>TOTAL: $${totalPayable.toFixed(2)}</B></R>\n`;
+        payload += `\n\n<C>Thank you!</C>\n\n\n`;
+      } else {
+        payload = "TEST PRINT FROM APP\nSUCCESS\n\n\n\n";
+      }
 
-      // Print the bill
-      await BLEPrinter.printBill(payload);
+      // If printer dropped while app was open, retry once after reconnect.
+      try {
+        if (activeBleDeviceRef.current) {
+          const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(() => resolve(), ms));
+          const device = activeBleDeviceRef.current;
+          
+          try {
+            // Request larger MTU for better performance on modern devices
+            if (Platform.OS === 'android') {
+              await device.requestMTU(512);
+              await sleep(200);
+            }
+          } catch (mtuError) {
+            console.log('MTU Request failed (normal for some devices):', mtuError);
+          }
+
+          const services = await device.services();
+          await sleep(500); // Let connection settle
+          let written = false;
+
+          // Hardcoded "TEST\n\n\n\n\n" in base64 to eliminate encoding issues
+          const testBase64 = "VEVTVAoKAAoKAAoK"; 
+
+          for (const service of services) {
+            const chars = await service.characteristics();
+            for (const char of chars) {
+              if (char.isWritableWithResponse || char.isWritableWithoutResponse) {
+                console.log(`Force Write Attempt -> Service: ${service.uuid}, Char: ${char.uuid}`);
+                
+                try {
+                  if (char.isWritableWithoutResponse) {
+                    await device.writeCharacteristicWithoutResponseForService(
+                      service.uuid,
+                      char.uuid,
+                      testBase64
+                    );
+                  }
+                  
+                  if (char.isWritableWithResponse) {
+                    await device.writeCharacteristicWithResponseForService(
+                      service.uuid,
+                      char.uuid,
+                      testBase64
+                    );
+                  }
+                  written = true;
+                } catch (e) {
+                  console.log(`Write failed: ${char.uuid}`, e);
+                }
+                await sleep(100);
+              }
+            }
+          }
+        } else {
+          await BLEPrinter.printBill(payload);
+        }
+      } catch (printError) {
+        if (!activeBleDeviceRef.current) {
+          await BLEPrinter.connectPrinter(targetDevice.inner_mac_address);
+          connectedPrinterMacRef.current = targetDevice.inner_mac_address;
+          await BLEPrinter.printBill(payload);
+        } else {
+          throw printError;
+        }
+      }
       
       return true;
     } catch (error: any) {
       const rawError = error?.message || String(error) || 'Unknown Print Error';
       console.log('BLE Print Error:', rawError);
+      connectedPrinterMacRef.current = null;
       
       setCheckoutFeedback({
         message: `Print Error: ${rawError}`,
@@ -907,10 +1458,45 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
     if (!latestStoredBill) return;
     setCheckoutFeedback(null); // Clear previous errors
     setReceiptActionState('loading');
-    const success = await bluetoothPrintReceipt();
+    let devices = pairedBluetoothDevices;
+    if (!devices || devices.length === 0) {
+      devices = (await loadBluetoothDevices()) || [];
+    }
+
+    if (devices && devices.length > 1) {
+      setPendingPrintBill(latestStoredBill);
+      setIsPrinterPickerVisible(true);
+      setReceiptActionState('idle');
+      return;
+    }
+
+    const target = devices.length === 1 ? devices[0] : undefined;
+    const success = await bluetoothPrintReceipt(latestStoredBill, target);
     setReceiptActionState('idle');
     if (success) {
-      setCheckoutFeedback({ message: 'Receipt sent to printer.', tone: 'success' });
+      setCheckoutFeedback({
+        message: 'Receipt sent to printer.',
+        tone: 'success',
+      });
+    }
+  };
+
+  const printWithSelectedDevice = async (device: BluetoothPrinterDevice) => {
+    setIsPrinterPickerVisible(false);
+    if (!pendingPrintBill) {
+      return;
+    }
+
+    setReceiptActionState('loading');
+    const success = await bluetoothPrintReceipt(pendingPrintBill, device);
+    setReceiptActionState('idle');
+    setPendingPrintBill(null);
+
+    if (success) {
+      setCheckoutFeedback({
+        message: `Receipt sent to ${device.device_name || device.inner_mac_address}.`,
+        tone: 'success',
+      });
     }
   };
 
@@ -1030,8 +1616,18 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
       setIsBillModalVisible(true);
     }
 
-    // BACKGROUND PRINT (Silent)
-    bluetoothPrintReceipt(storedBill);
+    // BACKGROUND PRINT (Silent if single device, Picker if multiple)
+    let devices = pairedBluetoothDevices;
+    if (!devices || devices.length === 0) {
+      devices = (await loadBluetoothDevices()) || [];
+    }
+    
+    if (devices && devices.length > 1) {
+      setPendingPrintBill(billData);
+      setIsPrinterPickerVisible(true);
+    } else {
+      bluetoothPrintReceipt(storedBill, devices?.[0]);
+    }
   };
 
   const renderHome = () => (
@@ -1056,6 +1652,109 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
         </Text>
       </Pressable>
     </View>
+  );
+
+  const renderSettings = () => (
+    <>
+      <View style={[styles.topBackRow, sectionWidthStyle]}>
+        <Pressable onPress={() => setView('home')} style={styles.backButton}>
+          <Image source={backIcon} style={styles.backButtonIcon} />
+        </Pressable>
+      </View>
+
+      <View style={[styles.sectionCard, sectionWidthStyle]}>
+        <View style={styles.sectionHeader}>
+          <View style={styles.sectionHeaderText}>
+            <Text style={styles.sectionEyebrow}>SETTINGS</Text>
+            <Text style={styles.sectionTitle}>Printer Devices</Text>
+            <Text style={styles.sectionSubtitle}>
+              Add and manage printer devices for receipt printing.
+            </Text>
+          </View>
+        </View>
+
+        {!pairedBluetoothDevices.length ? (
+          <Pressable
+            onPress={openAddDeviceModal}
+            disabled={isAddDeviceOpening}
+            style={({ pressed }) => [
+              styles.settingsActionButton,
+              isAddDeviceOpening ? styles.settingsActionButtonDisabled : null,
+              pressed ? styles.settingsActionButtonPressed : null,
+            ]}>
+            {isAddDeviceOpening ? (
+              <ActivityIndicator size="small" color={palette.white} />
+            ) : (
+              <Text style={styles.settingsActionButtonLabel}>Add Device</Text>
+            )}
+          </Pressable>
+        ) : null}
+
+        {checkoutFeedback ? (
+          <InlineMessage
+            message={checkoutFeedback.message}
+            tone={checkoutFeedback.tone}
+          />
+        ) : null}
+
+        <View style={styles.settingsDevicesCard}>
+          <View style={styles.settingsAddedHeaderRow}>
+            <Text style={styles.settingsStatusLabel}>Added devices</Text>
+            {pairedBluetoothDevices.length ? (
+              <Pressable
+                onPress={openAddDeviceModal}
+                disabled={isAddDeviceOpening}
+                style={({ pressed }) => [
+                  styles.settingsDeviceActionButton,
+                  isAddDeviceOpening ? styles.settingsActionButtonDisabled : null,
+                  pressed ? styles.settingsActionButtonPressed : null,
+                ]}>
+                {isAddDeviceOpening ? (
+                  <ActivityIndicator size="small" color={palette.white} />
+                ) : (
+                  <Text style={styles.settingsDeviceActionLabel}>Add Device</Text>
+                )}
+              </Pressable>
+            ) : null}
+          </View>
+
+          {pairedBluetoothDevices.length ? (
+            pairedBluetoothDevices.map(device => {
+              const isConnected =
+                connectedPrinterMacRef.current === device.inner_mac_address;
+
+              return (
+                <View key={device.inner_mac_address} style={styles.settingsDeviceRow}>
+                  <View style={styles.settingsDeviceTextWrap}>
+                    <Text style={styles.settingsDeviceName}>
+                      {device.device_name || 'Unnamed printer'}
+                    </Text>
+                    <Text style={styles.settingsDeviceMeta}>
+                      {device.inner_mac_address}
+                      {isConnected ? ' - Connected' : ''}
+                    </Text>
+                  </View>
+                  <View style={styles.settingsDeviceActions}>
+                    <Pressable
+                      onPress={() => bluetoothPrintReceipt(null, device)}
+                      style={({ pressed }) => [
+                        styles.settingsDeviceActionButton,
+                        pressed ? styles.settingsActionButtonPressed : null,
+                      ]}>
+                      <Text style={styles.settingsDeviceActionLabel}>Test</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              );
+            })
+          ) : (
+            <Text style={styles.settingsStatusValue}>
+              No added devices. Tap Add Device to scan and connect.
+            </Text>
+          )}
+        </View>
+      </View>
+    </>
   );
 
   const renderCustomers = () => (
@@ -1970,7 +2669,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
                       pressed ? styles.receiptSecondaryButtonPressed : null,
                     ]}>
                     {receiptActionState === 'loading' ? (
-                      <ActivityIndicator size="small" color={ui.textHeading} />
+                      <ActivityIndicator size="small" color={palette.white} />
                     ) : (
                       <Text style={styles.receiptSecondaryButtonLabel}>
                         Print
@@ -2195,6 +2894,63 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
         </SafeAreaView>
       </Modal>
 
+      <Modal
+        animationType="fade"
+        onRequestClose={() => setIsPrinterPickerVisible(false)}
+        transparent
+        visible={isPrinterPickerVisible}>
+        <View style={styles.quantityModalOverlay}>
+          <Pressable
+            onPress={() => setIsPrinterPickerVisible(false)}
+            style={styles.quantityModalBackdrop}
+          />
+          <View style={[styles.categoryDropdownCard, categoryDropdownCardStyle]}>
+            <Text style={styles.categoryDropdownEyebrow}>Printer Selection</Text>
+            <Text style={styles.categoryDropdownTitle}>Choose printer</Text>
+            <Text style={styles.categoryDropdownSubtitle}>
+              Multiple paired devices found. Select one to print.
+            </Text>
+
+            <ScrollView
+              contentContainerStyle={styles.categoryDropdownOptions}
+              showsVerticalScrollIndicator={false}
+              style={styles.categoryDropdownScroll}>
+              {pairedBluetoothDevices.map(device => (
+                <Pressable
+                  key={device.inner_mac_address}
+                  onPress={() => printWithSelectedDevice(device)}
+                  style={({pressed}) => [
+                    styles.categoryDropdownOption,
+                    selectedBluetoothPrinterMac === device.inner_mac_address
+                      ? styles.categoryDropdownOptionActive
+                      : null,
+                    pressed ? styles.categoryDropdownOptionPressed : null,
+                  ]}>
+                  <Text
+                    style={[
+                      styles.categoryDropdownOptionLabel,
+                      selectedBluetoothPrinterMac === device.inner_mac_address
+                        ? styles.categoryDropdownOptionLabelActive
+                        : null,
+                    ]}>
+                    {device.device_name || device.inner_mac_address}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            <Pressable
+              onPress={() => setIsPrinterPickerVisible(false)}
+              style={({pressed}) => [
+                styles.categoryDropdownCloseButton,
+                pressed ? styles.categoryDropdownCloseButtonPressed : null,
+              ]}>
+              <Text style={styles.categoryDropdownCloseButtonLabel}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
     </>
   );
 
@@ -2210,20 +2966,125 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
             </Text>
           </View>
 
-          <Pressable
-            onPress={onSignOut}
-            style={({ pressed }) => [
-              styles.signOutButton,
-              pressed ? styles.signOutButtonPressed : null,
-            ]}>
-            <Text style={styles.signOutButtonLabel}>Sign out</Text>
-          </Pressable>
+          <View style={styles.utilityActions}>
+            <Pressable
+              onPress={() => setView('settings')}
+              style={({pressed}) => [
+                styles.settingsIconButton,
+                pressed ? styles.settingsIconButtonPressed : null,
+              ]}>
+              <Text style={styles.settingsIconGlyph}>⚙</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={onSignOut}
+              style={({ pressed }) => [
+                styles.signOutButton,
+                pressed ? styles.signOutButtonPressed : null,
+              ]}>
+              <Text style={styles.signOutButtonLabel}>Sign out</Text>
+            </Pressable>
+          </View>
         </View>
 
         {view === 'home' ? renderHome() : null}
         {view === 'customers' ? renderCustomers() : null}
         {view === 'products' ? renderProducts() : null}
+        {view === 'settings' ? renderSettings() : null}
       </ScreenContainer>
+
+      <Modal
+        animationType="slide"
+        onRequestClose={() => setIsAddDeviceModalVisible(false)}
+        transparent={false}
+        visible={isAddDeviceModalVisible}>
+        <SafeAreaView style={styles.settingsScannerScreen}>
+          <View style={[styles.categoryDropdownCard, categoryDropdownCardStyle]}>
+            <Text style={styles.categoryDropdownEyebrow}>Add Device</Text>
+            <Text style={styles.categoryDropdownTitle}>Connect Printer In-App</Text>
+            <Text style={styles.categoryDropdownSubtitle}>
+              Select a discovered printer to connect without leaving the app.
+            </Text>
+            <Text style={styles.settingsScanStatusLabel}>{addDeviceScanMessage}</Text>
+            {addDeviceLastError ? (
+              <Text style={styles.settingsScanErrorLabel}>{addDeviceLastError}</Text>
+            ) : null}
+
+            <ScrollView
+              contentContainerStyle={styles.categoryDropdownOptions}
+              showsVerticalScrollIndicator={false}
+              style={styles.categoryDropdownScroll}>
+              {isAddDeviceLoading ? (
+                <View style={styles.settingsLoadingWrap}>
+                  <ActivityIndicator size="small" color={ui.accentStrong} />
+                  <Text style={styles.settingsLoadingLabel}>Searching devices...</Text>
+                </View>
+              ) : discoveredBluetoothDevices.length ? (
+                discoveredBluetoothDevices.map(device => (
+                  <View
+                    key={device.inner_mac_address}
+                    style={styles.settingsDeviceRow}>
+                    <View style={styles.settingsDeviceTextWrap}>
+                      <Text style={styles.settingsDeviceName}>
+                        {device.device_name || 'Unnamed printer'}
+                      </Text>
+                      <Text style={styles.settingsDeviceMeta}>
+                        {device.inner_mac_address}
+                      </Text>
+                    </View>
+                    <Pressable
+                      disabled={Boolean(connectingDeviceMac)}
+                      onPress={async () => {
+                        await connectBluetoothDevice(device);
+                        setIsAddDeviceModalVisible(false);
+                      }}
+                      style={({ pressed }) => [
+                        styles.settingsDeviceActionButton,
+                        Boolean(connectingDeviceMac)
+                          ? styles.settingsActionButtonDisabled
+                          : null,
+                        pressed ? styles.settingsActionButtonPressed : null,
+                      ]}>
+                      {connectingDeviceMac === device.inner_mac_address ? (
+                        <ActivityIndicator size="small" color={palette.white} />
+                      ) : (
+                        <Text style={styles.settingsDeviceActionLabel}>
+                          Click to connect
+                        </Text>
+                      )}
+                    </Pressable>
+                  </View>
+                ))
+              ) : (
+                <Text style={styles.settingsStatusValue}>
+                  No in-app devices found yet. Make sure Bluetooth is ON, printer is close, then tap Rescan.
+                </Text>
+              )}
+            </ScrollView>
+
+            <View style={styles.settingsActionsRow}>
+              <Pressable
+                onPress={scanAvailableBluetoothDevices}
+                style={({ pressed }) => [
+                  styles.categoryDropdownCloseButton,
+                  styles.settingsActionButtonHalf,
+                  pressed ? styles.categoryDropdownCloseButtonPressed : null,
+                ]}>
+                <Text style={styles.categoryDropdownCloseButtonLabel}>Rescan</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setIsAddDeviceModalVisible(false)}
+                style={({ pressed }) => [
+                  styles.categoryDropdownCloseButton,
+                  styles.settingsActionButtonHalf,
+                  pressed ? styles.categoryDropdownCloseButtonPressed : null,
+                ]}>
+                <Text style={styles.categoryDropdownCloseButtonLabel}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </SafeAreaView>
+      </Modal>
     </View>
   );
 };
@@ -2737,7 +3598,6 @@ const styles = StyleSheet.create({
   },
   receiptActionButtons: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: spacing.md,
     marginTop: spacing.lg,
   },
@@ -2805,7 +3665,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     minHeight: 38,
-    minWidth: 120,
+    minWidth: 80,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
   },
@@ -3590,6 +4450,178 @@ const styles = StyleSheet.create({
   signOutButtonPressed: {
     opacity: 0.88,
   },
+  settingsActionButton: {
+    alignItems: 'center',
+    backgroundColor: ui.accentStrong,
+    borderRadius: radii.pill,
+    justifyContent: 'center',
+    marginTop: spacing.sm,
+    minHeight: 42,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  settingsActionButtonLabel: {
+    color: palette.white,
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  settingsActionButtonPressed: {
+    opacity: 0.9,
+  },
+  settingsActionButtonHalf: {
+    flex: 1,
+    marginTop: 0,
+  },
+  settingsActionButtonMuted: {
+    backgroundColor: ui.textMuted,
+  },
+  settingsActionButtonDisabled: {
+    opacity: 0.5,
+  },
+  settingsActionsRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  settingsDevicesCard: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    marginTop: spacing.md,
+    padding: spacing.lg,
+  },
+  settingsAddedHeaderRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: spacing.sm,
+  },
+  settingsDeviceRow: {
+    alignItems: 'center',
+    borderBottomColor: ui.cardBorder,
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.sm,
+  },
+  settingsDeviceTextWrap: {
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  settingsDeviceName: {
+    color: ui.textHeading,
+    fontSize: 14,
+    fontWeight: '800',
+    marginBottom: spacing.xs,
+  },
+  settingsDeviceMeta: {
+    color: ui.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  settingsDeviceActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  settingsDeviceActionButton: {
+    alignItems: 'center',
+    backgroundColor: ui.accentStrong,
+    borderRadius: radii.pill,
+    justifyContent: 'center',
+    minHeight: 32,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  settingsDeviceActionButtonDanger: {
+    backgroundColor: '#AF3E3E',
+  },
+  settingsDeviceActionLabel: {
+    color: palette.white,
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  settingsLoadingWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 120,
+    paddingVertical: spacing.md,
+  },
+  settingsLoadingLabel: {
+    color: ui.textMuted,
+    fontSize: 13,
+    fontWeight: '700',
+    marginTop: spacing.sm,
+  },
+  settingsScanStatusLabel: {
+    color: ui.textMuted,
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: spacing.sm,
+  },
+  settingsScanErrorLabel: {
+    color: '#AF3E3E',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: spacing.sm,
+  },
+  settingsScannerScreen: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.md,
+  },
+  settingsIconButton: {
+    alignItems: 'center',
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    display: 'flex',
+    flexDirection: 'row',
+    height: 40,
+    justifyContent: 'center',
+    width: 40,
+  },
+  settingsIconButtonPressed: {
+    opacity: 0.88,
+  },
+  settingsIconGlyph: {
+    color: ui.textHeading,
+    fontSize: 20,
+    fontWeight: '900',
+    height: 40,
+    includeFontPadding: false,
+    lineHeight: 40,
+    textAlign: 'center',
+    textAlignVertical: 'center',
+    width: 40,
+  },
+  settingsStatusCard: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    marginBottom: spacing.md,
+    padding: spacing.lg,
+  },
+  settingsStatusLabel: {
+    color: ui.textMuted,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    marginBottom: spacing.xs,
+  },
+  settingsStatusValue: {
+    color: ui.textHeading,
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 21,
+  },
   summaryCard: {
     backgroundColor: ui.darkSurface,
     borderColor: ui.darkBorder,
@@ -3817,6 +4849,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: spacing.md,
+  },
+  utilityActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
   },
   modalHeader: {
     alignItems: 'center',
