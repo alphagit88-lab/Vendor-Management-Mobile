@@ -118,6 +118,8 @@ export const orderService = {
           total_amount: request.totalAmount,
           total_credits: request.totalCredits,
           total_deposit: request.totalDeposit,
+          customerSignature: request.customerSignature,
+          driverSignature: request.driverSignature,
         }),
       });
 

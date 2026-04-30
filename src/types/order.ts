@@ -59,6 +59,8 @@ export interface CreateOrderRequest {
   totalAmount: number;
   totalCredits: number;
   totalDeposit: number;
+  customerSignature?: string | null;
+  driverSignature?: string | null;
 }
 
 export interface CreateOrderItem {

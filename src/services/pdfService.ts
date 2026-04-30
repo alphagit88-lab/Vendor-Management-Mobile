@@ -19,6 +19,9 @@ interface OrderPdfNativeModule {
   renderPdfForGrayscalePrinter(
     payload: StoredBillActionRequest,
   ): Promise<{ base64Data: string; previewBase64: string; widthBytes: number; totalLines: number }>;
+  printPdfToZebra(
+    payload: { macAddress: string, url: string, token: string }
+  ): Promise<boolean>;
 }
 
 const {OrderPdfModule} = NativeModules as {
@@ -131,6 +134,30 @@ export const pdfService = {
       return {
         ok: false,
         message: getErrorMessage(error) || 'Unable to render the receipt for LX printer.',
+      };
+    }
+  },
+  
+  async printPdfToZebra(
+    request: { macAddress: string, url: string, token: string }
+  ): Promise<ServiceResult<boolean>> {
+    if (!OrderPdfModule?.printPdfToZebra) {
+      return {
+        ok: false,
+        message: 'Zebra printing is not available in this app build yet.',
+      };
+    }
+
+    try {
+      const data = await OrderPdfModule.printPdfToZebra(request);
+      return {
+        ok: true,
+        data,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: getErrorMessage(error) || 'Unable to print to Zebra printer.',
       };
     }
   },

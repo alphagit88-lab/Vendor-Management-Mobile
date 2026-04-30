@@ -16,6 +16,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  TouchableOpacity,
   View,
   useWindowDimensions,
 } from 'react-native';
@@ -24,6 +25,7 @@ import RNPrint from 'react-native-print';
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { BLEPrinter } from '@haroldtran/react-native-thermal-printer';
 import { BleManager } from 'react-native-ble-plx';
+import SignatureModal from '../components/SignatureModal';
 
 import { InlineMessage } from '../components/common/InlineMessage';
 import { ScreenContainer } from '../components/common/ScreenContainer';
@@ -46,6 +48,7 @@ import {
   Customer,
   PersonalInventoryItem,
   StoredOrderBill,
+  CreateOrderRequest,
 } from '../types/order';
 
 type HomeView = 'home' | 'customers' | 'products' | 'settings';
@@ -321,7 +324,7 @@ const ui = {
   textMuted: '#738278',
 };
 
-export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
+export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
   const { width } = useWindowDimensions();
   const [view, setView] = useState<HomeView>('home');
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -405,10 +408,13 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
   const connectedPrinterMacRef = useRef<string | null>(null);
   const bleManagerRef = useRef<BleManager | null>(null);
   const activeBleDeviceRef = useRef<any>(null);
+  const [isHistoryExpanded, setIsHistoryExpanded] = useState(false);
+
+  // Signature States
+  const [customerSignature, setCustomerSignature] = useState<string | null>(null);
+  const [driverSignature, setDriverSignature] = useState<string | null>(null);
+  const [signatureModalType, setSignatureModalType] = useState<'customer' | 'driver' | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [printPreviewImage, setPrintPreviewImage] = useState<string | null>(null);
-  const [printPreviewLines, setPrintPreviewLines] = useState(0);
-  const [isPrintPreviewVisible, setIsPrintPreviewVisible] = useState(false);
   const authRef = useRef<{
     mac?: Uint8Array;
     authBytes?: Uint8Array;
@@ -451,25 +457,6 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
         break;
       }
     }
-  };
-
-  const toBase64 = (str: string) => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-    let output = '';
-    for (
-      let block = 0, charCode, i = 0, map = chars;
-      str.charAt(i | 0) || (map = '=', i % 1);
-      output += map.charAt(63 & (block >> (8 - (i % 1) * 8)))
-    ) {
-      charCode = str.charCodeAt((i += 3 / 4));
-      if (charCode > 0xff) {
-        throw new Error(
-          "'btoa' failed: The string to be encoded contains characters outside of the Latin1 range.",
-        );
-      }
-      block = (block << 8) | charCode;
-    }
-    return output;
   };
 
   useEffect(() => {
@@ -1183,7 +1170,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
         const availablePrinterDevices =
           ((await withTimeout(BLEPrinter.getDeviceList() as Promise<BluetoothPrinterDevice[]>, 4000, 'Standard driver scan timed out.')) as BluetoothPrinterDevice[]) ?? [];
         validPrinterDevices = availablePrinterDevices.filter(item => item.inner_mac_address);
-      } catch (ignoredError) {}
+      } catch (ignoredError) { }
 
       const resolvedPrinterDevice =
         validPrinterDevices.find(
@@ -1398,16 +1385,16 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
             await bleDevice.discoverAllServicesAndCharacteristics();
             activeBleDeviceRef.current = bleDevice;
             connectedPrinterMacRef.current = mac;
-            
+
             // Trigger Auth if LX
             if ((device.device_name || '').toUpperCase().startsWith('LX')) {
-               bleDevice.monitorCharacteristicForService('ffe6', 'ffe2', (error: any, char: any) => {
-                 if (!error && char?.value) handleLXAuth(bleDevice, base64ToBytes(char.value));
-               });
-               await new Promise<void>(r => setTimeout(() => r(), 1000));
-               await bleDevice.writeCharacteristicWithoutResponseForService('ffe6', 'ffe1', bytesToBase64(new Uint8Array([0x5a, 0x01])));
-               // Wait for auth to complete
-               await new Promise<void>(r => setTimeout(() => r(), 2000));
+              bleDevice.monitorCharacteristicForService('ffe6', 'ffe2', (error: any, char: any) => {
+                if (!error && char?.value) handleLXAuth(bleDevice, base64ToBytes(char.value));
+              });
+              await new Promise<void>(r => setTimeout(() => r(), 1000));
+              await bleDevice.writeCharacteristicWithoutResponseForService('ffe6', 'ffe1', bytesToBase64(new Uint8Array([0x5a, 0x01])));
+              // Wait for auth to complete
+              await new Promise<void>(r => setTimeout(() => r(), 2000));
             }
           } else {
             throw err;
@@ -1420,23 +1407,23 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
         console.log("Running Proprietary LX Print Test...");
         const serviceUuid = "ffe6";
         const sendCharUuid = "ffe1";
-        
+
         // Start Command
         await activeBleDeviceRef.current.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(new Uint8Array([0x5a, 0x04, 0x00, 0x02, 0x00, 0x00])));
         await new Promise<void>(r => setTimeout(() => r(), 100));
-        
+
         // Solid Black Line
         const line = new Uint8Array(100);
         line[0] = 0x55;
         for (let i = 3; i < 99; i++) line[i] = 0xFF;
         await activeBleDeviceRef.current.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(line));
         await new Promise<void>(r => setTimeout(() => r(), 100));
-        
+
         // End Command
         const endLine = new Uint8Array(100);
         endLine[0] = 0x55; endLine[2] = 0x01;
         await activeBleDeviceRef.current.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(endLine));
-        
+
         setCheckoutFeedback({ message: 'Proprietary LX test sent.', tone: 'success' });
       } else if (activeBleDeviceRef.current) {
         // ... existing generic BLE test code ...
@@ -1447,7 +1434,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
 
         const wakeUpBase64 = "AA==";
         const testTextBase64 = "VEVTVAoK";
-        
+
         let testSent = false;
         for (const service of services) {
           const chars = await service.characteristics();
@@ -1467,7 +1454,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
                 await writeToCharacteristic("CgoKCg==");
                 testSent = true;
                 break;
-              } catch (e) {}
+              } catch (e) { }
             }
           }
           if (testSent) break;
@@ -1486,60 +1473,6 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
     }
   };
 
-  const handleLXPrintNow = async () => {
-    const data = (this as any)._pendingLXData;
-    if (!data || !activeBleDeviceRef.current) return;
-    
-    setIsPrintPreviewVisible(false);
-    setIsBluetoothLoading(true);
-    setCheckoutFeedback({ message: 'Sending to printer...', tone: 'info' });
-
-    try {
-      const { base64Data, totalLines } = data;
-      const rawData = base64ToBytes(base64Data);
-      const deviceObj = activeBleDeviceRef.current;
-      const serviceUuid = "ffe6";
-      const sendCharUuid = "ffe1";
-
-      console.log('--- LX PRINT PACKET LOG ---');
-      
-      // 1. Start Print Command
-      const startCmd = new Uint8Array([0x5a, 0x04, (totalLines + 1) >> 8, (totalLines + 1) & 0xff, 0x00, 0x00]);
-      console.log('START CMD (HEX):', Array.from(startCmd).map(b => b.toString(16).padStart(2, '0')).join(' '));
-      // await deviceObj.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(startCmd));
-      
-      // 2. Send Line Data
-      console.log(`Sending ${totalLines} data packets...`);
-      for (let i = 0; i < totalLines; i++) {
-        const line = new Uint8Array(100);
-        line[0] = 0x55;
-        line[1] = i >> 8;
-        line[2] = i & 0xff;
-        line.set(rawData.slice(i * 96, (i + 1) * 96), 3);
-        
-        // Log FULL hex for every line as requested
-        const hex = Array.from(line).map(b => b.toString(16).padStart(2, '0')).join('');
-        console.log(`L${i}: ${hex}`);
-        
-        // await deviceObj.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(line));
-      }
-
-      // 3. End Print Command
-      const endLine = new Uint8Array(100);
-      endLine[0] = 0x55;
-      endLine[1] = totalLines >> 8;
-      endLine[2] = totalLines & 0xff;
-      console.log('END CMD (HEX):', Array.from(endLine.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' '), '...');
-      // await deviceObj.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(endLine));
-
-      setCheckoutFeedback({ message: 'Packets logged to console!', tone: 'success' });
-    } catch (error) {
-      setCheckoutFeedback({ message: `Print failed: ${String(error)}`, tone: 'error' });
-    } finally {
-      setIsBluetoothLoading(false);
-    }
-  };
-
   const bluetoothPrintReceipt = async (
     billData?: any,
     selectedDevice?: BluetoothPrinterDevice,
@@ -1548,12 +1481,15 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
       const bill = billData || latestStoredBill;
       if (!bill) return false;
 
+      const billUrl = bill.url || bill.bill_link;
+      if (!billUrl) return false;
+
       let targetDevice = selectedDevice;
       if (!targetDevice) {
         // First check paired devices in state to avoid slow scanning
-        targetDevice = pairedBluetoothDevices.find(d => d.inner_mac_address === selectedBluetoothPrinterMac) || 
-                       pairedBluetoothDevices.find(d => (d.device_name || '').toUpperCase().startsWith('LX'));
-        
+        targetDevice = pairedBluetoothDevices.find(d => d.inner_mac_address === selectedBluetoothPrinterMac) ||
+          pairedBluetoothDevices.find(d => (d.device_name || '').toUpperCase().startsWith('LX'));
+
         // Only scan if absolutely necessary
         if (!targetDevice) {
           const devices = await loadBluetoothDevices();
@@ -1564,9 +1500,29 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
       }
       if (!targetDevice) return false;
       const mac = targetDevice.inner_mac_address;
+
       const isLX = (targetDevice.device_name || '').toUpperCase().startsWith('LX');
 
-      if (isLX) {
+      if (!isLX) {
+        // --- PROFESSIONAL ZEBRA SDK PATH (Default for all non-LX printers) ---
+        setCheckoutFeedback({ message: 'Printing via Zebra SDK...', tone: 'info' });
+        try {
+          const result = await pdfService.printPdfToZebra({
+            macAddress: mac,
+            url: billUrl,
+            token: session.token
+          });
+          if (result.ok) {
+            setCheckoutFeedback({ message: 'Print successful!', tone: 'success' });
+            return true;
+          } else {
+            throw new Error(result.message);
+          }
+        } catch (error: any) {
+          throw new Error(`Zebra SDK Print Failed: ${error.message}`);
+        }
+      } else {
+        // --- LEGACY LX PRINTER PATH ---
         // Ensure connection first
         if (connectedPrinterMacRef.current !== mac || !activeBleDeviceRef.current) {
           if (bleManagerRef.current) {
@@ -1610,7 +1566,7 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
           line[1] = i >> 8;
           line[2] = i & 0xff;
           line.set(rawData.slice(i * 96, (i + 1) * 96), 3);
-          
+
           await deviceObj.writeCharacteristicWithoutResponseForService(serviceUuid, sendCharUuid, bytesToBase64(line));
           if (i % 20 === 0) await new Promise<void>(r => setTimeout(() => r(), 25));
         }
@@ -1624,72 +1580,6 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
 
         setCheckoutFeedback({ message: 'Print complete!', tone: 'success' });
         return true;
-      }
-
-      // Standard path connection logic (Only if not LX or if we decide to continue later)
-      if (connectedPrinterMacRef.current !== mac) {
-        try {
-          await BLEPrinter.connectPrinter(mac);
-          activeBleDeviceRef.current = null;
-        } catch (err) {
-          if (bleManagerRef.current) {
-            const bleDevice = await bleManagerRef.current.connectToDevice(mac);
-            await bleDevice.discoverAllServicesAndCharacteristics();
-            activeBleDeviceRef.current = bleDevice;
-          } else {
-            throw err;
-          }
-        }
-        connectedPrinterMacRef.current = mac;
-      }
-
-      // Generic Text Printing (for non-LX printers)
-      let payload = `<CB>SILVER EAGLE DISTRIBUTORS</CB>\n`;
-      payload += `<C>PO BOX 841521, DALLAS, TX 75284</C>\n`;
-      payload += `<C>Phone: 713-869-4361</C>\n`;
-      payload += `<L>--------------------------------</L>\n`;
-      payload += `<L>Invoice#: ${bill.order_number}</L>\n`;
-      payload += `<L>Customer: ${bill.customer_name}</L>\n`;
-      payload += `<L>Date: ${new Date().toLocaleString()}</L>\n`;
-      payload += `<L>--------------------------------</L>\n`;
-      payload += `<B>ITEM           QTY    PRICE</B>\n`;
-
-      selectedProducts.forEach(p => {
-        const qty = selectedQuantities[p.id] || 0;
-        const price = (p.unitPrice * qty).toFixed(2);
-        const name = p.item_name.substring(0, 14).padEnd(14);
-        const qStr = qty.toString().padEnd(6);
-        payload += `<L>${name} ${qStr} $${price}</L>\n`;
-      });
-
-      payload += `<L>--------------------------------</L>\n`;
-      payload += `<R><B>TOTAL: $${totalPayable.toFixed(2)}</B></R>\n`;
-      payload += `\n\n<C>Thank you!</C>\n\n\n`;
-
-      if (activeBleDeviceRef.current) {
-        const deviceObj = activeBleDeviceRef.current;
-        const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(() => resolve(), ms));
-        const services = await deviceObj.services();
-        const cleanPayload = payload.replace(/<[^>]*>/g, '') + '\n\n\n';
-        const chunkSize = 20;
-
-        for (const service of services) {
-          const chars = await service.characteristics();
-          for (const char of chars) {
-            if (char.isWritableWithResponse || char.isWritableWithoutResponse) {
-              for (let i = 0; i < cleanPayload.length; i += chunkSize) {
-                const chunk = cleanPayload.substring(i, i + chunkSize);
-                const b64 = ReactNativeBlobUtil.base64.encode(chunk);
-                if (char.isWritableWithoutResponse) await deviceObj.writeCharacteristicWithoutResponseForService(service.uuid, char.uuid, b64);
-                else await deviceObj.writeCharacteristicWithResponseForService(service.uuid, char.uuid, b64);
-                await sleep(100);
-              }
-              break;
-            }
-          }
-        }
-      } else {
-        await BLEPrinter.printBill(payload);
       }
 
       return true;
@@ -1818,27 +1708,31 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
     setLatestStoredBill(null);
     setReceiptActionState('idle');
 
-    const orderResponse = await orderService.createOrder(session.token, {
+    const payload: CreateOrderRequest = {
       customerId: selectedCustomer.id,
       items: selectedProducts.map(product => {
-        const quantity = selectedQuantities[product.id] ?? 0;
-        const subtotalValue = quantity * (product.unitPrice || 0);
-
+        const quantity = selectedQuantities[product.id] || 0;
         return {
           itemId: product.id,
           quantity,
-          subtotal: Number(subtotalValue.toFixed(2)),
-          unitPrice: Number((product.unitPrice || 0).toFixed(2)),
+          subtotal: quantity * product.unitPrice,
+          unitPrice: product.unitPrice,
           unitDeposit: 0,
-          unitDiscount: 0
+          unitDiscount: 0,
         };
       }),
       loadNumber: 'POS',
       notes: `POS Sale to ${selectedCustomer.name}`,
-      totalAmount: Number(itemSubtotal.toFixed(2)),
-      totalCredits: Number(creditMemoAmount.toFixed(2)),
-      totalDeposit: Number(containerDepositAmount.toFixed(2)),
-    });
+      totalAmount: totalPayable,
+      totalCredits: creditMemoAmount,
+      totalDeposit: containerDepositAmount,
+      customerSignature: customerSignature,
+      driverSignature: driverSignature,
+    };
+
+    console.log('📦 GENERATING BILL PAYLOAD:', JSON.stringify(payload, null, 2));
+
+    const orderResponse = await orderService.createOrder(session.token, payload);
 
     if (!orderResponse.ok || !orderResponse.data) {
       setCheckoutState('idle');
@@ -2875,6 +2769,75 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
                   </View>
                 </View>
 
+                <View style={styles.signatureSection}>
+                  <Text style={styles.signatureTitle}>Signatures</Text>
+                  <View style={styles.signatureRow}>
+                    <View style={styles.signatureColumn}>
+                      <View style={styles.signatureHeaderRow}>
+                        <Text style={styles.signatureLabel}>Driver</Text>
+                        {driverSignature ? (
+                          <TouchableOpacity
+                            onPress={() => setDriverSignature(null)}
+                            style={styles.signatureClearButton}>
+                            <Text style={styles.signatureClearButtonLabel}>✕</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
+                      {driverSignature ? (
+                        <Pressable
+                          onPress={() => setSignatureModalType('driver')}
+                          style={styles.signaturePreviewContainer}>
+                          <Image
+                            source={{ uri: driverSignature }}
+                            style={styles.signaturePreview}
+                          />
+                          <View style={styles.signatureRedrawOverlay}>
+                            <Text style={styles.signatureRedrawLabel}>Redraw</Text>
+                          </View>
+                        </Pressable>
+                      ) : (
+                        <Pressable
+                          onPress={() => setSignatureModalType('driver')}
+                          style={styles.signatureWriteButton}>
+                          <Text style={styles.signatureWriteButtonLabel}>Write</Text>
+                        </Pressable>
+                      )}
+                    </View>
+
+                    <View style={styles.signatureColumn}>
+                      <View style={styles.signatureHeaderRow}>
+                        <Text style={styles.signatureLabel}>Customer</Text>
+                        {customerSignature ? (
+                          <TouchableOpacity
+                            onPress={() => setCustomerSignature(null)}
+                            style={styles.signatureClearButton}>
+                            <Text style={styles.signatureClearButtonLabel}>✕</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
+                      {customerSignature ? (
+                        <Pressable
+                          onPress={() => setSignatureModalType('customer')}
+                          style={styles.signaturePreviewContainer}>
+                          <Image
+                            source={{ uri: customerSignature }}
+                            style={styles.signaturePreview}
+                          />
+                          <View style={styles.signatureRedrawOverlay}>
+                            <Text style={styles.signatureRedrawLabel}>Redraw</Text>
+                          </View>
+                        </Pressable>
+                      ) : (
+                        <Pressable
+                          onPress={() => setSignatureModalType('customer')}
+                          style={styles.signatureWriteButton}>
+                          <Text style={styles.signatureWriteButtonLabel}>Write</Text>
+                        </Pressable>
+                      )}
+                    </View>
+                  </View>
+                </View>
+
                 <View style={styles.payableBar}>
                   <View style={styles.payableBarTextWrap}>
                     <Text style={styles.summaryFooterLabel}>Total Payable</Text>
@@ -3374,6 +3337,19 @@ export const HomeScreen = ({ onSignOut, session }: HomeScreenProps) => {
           </View>
         </SafeAreaView>
       </Modal>
+
+      <SignatureModal
+        isVisible={signatureModalType !== null}
+        onClose={() => setSignatureModalType(null)}
+        onSave={(base64) => {
+          if (signatureModalType === 'driver') {
+            setDriverSignature(base64);
+          } else {
+            setCustomerSignature(base64);
+          }
+        }}
+        title={signatureModalType === 'driver' ? 'Driver Signature' : 'Customer Signature'}
+      />
     </View>
   );
 };
@@ -5181,5 +5157,99 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     padding: spacing.xl,
+  },
+  signatureSection: {
+    padding: spacing.lg,
+    backgroundColor: ui.softSurface,
+    borderRadius: radii.xl,
+    marginVertical: spacing.md,
+    borderWidth: 1,
+    borderColor: ui.cardBorder,
+  },
+  signatureTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: ui.textHeading,
+    marginBottom: spacing.md,
+    textAlign: 'center',
+  },
+  signatureRow: {
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  signatureColumn: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  signatureLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: ui.textMuted,
+    marginBottom: spacing.xs,
+  },
+  signatureWriteButton: {
+    width: '100%',
+    height: 60,
+    backgroundColor: palette.white,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: ui.cardBorderStrong,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  signatureWriteButtonLabel: {
+    color: palette.primaryStrong,
+    fontWeight: '600',
+  },
+  signaturePreview: {
+    width: '100%',
+    height: 60,
+    backgroundColor: palette.white,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: ui.cardBorderStrong,
+    resizeMode: 'contain',
+  },
+  signatureHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: spacing.xs,
+  },
+  signatureClearButton: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: ui.dangerSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  signatureClearButtonLabel: {
+    fontSize: 10,
+    color: '#EF4444',
+    fontWeight: 'bold',
+  },
+  signaturePreviewContainer: {
+    width: '100%',
+    position: 'relative',
+    overflow: 'hidden',
+    borderRadius: radii.md,
+  },
+  signatureRedrawOverlay: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(59, 130, 246, 0.8)',
+    paddingVertical: 2,
+    alignItems: 'center',
+  },
+  signatureRedrawLabel: {
+    color: palette.white,
+    fontSize: 8,
+    fontWeight: '800',
+    textTransform: 'uppercase',
   },
 });

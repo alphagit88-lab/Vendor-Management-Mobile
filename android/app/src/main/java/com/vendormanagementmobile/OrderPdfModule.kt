@@ -49,6 +49,14 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
+// Zebra SDK Imports
+import com.zebra.sdk.comm.BluetoothConnection
+import com.zebra.sdk.comm.Connection
+import com.zebra.sdk.printer.ZebraPrinterFactory
+import com.zebra.sdk.printer.ZebraPrinter
+import com.zebra.sdk.printer.PrinterLanguage
+import com.zebra.sdk.graphics.ZebraImageFactory
+
 class OrderPdfModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
@@ -143,125 +151,90 @@ class OrderPdfModule(reactContext: ReactApplicationContext) :
     }.start()
   }
 
+  /* 
   @ReactMethod
   fun renderPdfForGrayscalePrinter(payload: ReadableMap, promise: Promise) {
+     // ... (Old LX logic commented out)
+  }
+  */
+
+  @ReactMethod
+  fun printPdfToZebra(payload: ReadableMap, promise: Promise) {
+    val macAddress = payload.getString("macAddress") ?: ""
+    val pdfUrl = payload.getString("url") ?: ""
+    val token = payload.getString("token") ?: ""
+
     Thread {
+      var connection: Connection? = null
       try {
-        val remotePdfRequest = payload.toRemotePdfRequest()
+        // 1. Download PDF
+        val remotePdfRequest = RemotePdfRequest("bill.pdf", "Print Job", token, pdfUrl)
         val file = downloadPdfToCache(remotePdfRequest)
         val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         val renderer = PdfRenderer(pfd)
 
-        val targetWidth = 320 // 40 bytes - Safe width for all 58mm printers to avoid cropping
-        val internalPadding = 0
-        val totalLines = mutableListOf<ByteArray>()
+        // 2. Render PDF to Bitmap (Single tall bitmap)
+        // Zebra ZQ320 is 576 dots wide
+        val targetWidth = 576 
+        var totalHeight = 0
+        val pageBitmaps = mutableListOf<Bitmap>()
         
-        // For preview
-        var previewBitmap: Bitmap? = null
-        var previewCanvas: Canvas? = null
-        var previewY = 0f
-
         for (i in 0 until renderer.pageCount) {
           val page = renderer.openPage(i)
           val aspectRatio = page.height.toFloat() / page.width.toFloat()
           val targetHeight = (targetWidth * aspectRatio).toInt()
-
+          
           val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
           val canvas = Canvas(bitmap)
           canvas.drawColor(Color.WHITE)
-          
-          // Use full width destRect to match lxprint
           val destRect = Rect(0, 0, targetWidth, targetHeight)
           page.render(bitmap, destRect, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
           
-          // Add to preview
-          if (previewBitmap == null) {
-              // Create a tall bitmap for all pages
-              previewBitmap = Bitmap.createBitmap(targetWidth, targetHeight * renderer.pageCount, Bitmap.Config.ARGB_8888)
-              previewCanvas = Canvas(previewBitmap!!)
-              previewCanvas.drawColor(Color.WHITE)
-          }
-          previewCanvas?.drawBitmap(bitmap, 0f, previewY, null)
-          previewY += targetHeight
-
-          // Convert bitmap to 1bpp (96 bytes per line)
-          for (y in 0 until targetHeight) {
-            val lineBytes = ByteArray(96)
-            for (x in 0 until targetWidth) {
-              val pixel = bitmap.getPixel(x, y)
-              val gray = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3
-              if (gray < 200) {
-                val byteIdx = x / 8
-                val bitIdx = 7 - (x % 8)
-                lineBytes[byteIdx] = (lineBytes[byteIdx].toInt() or (1 shl bitIdx)).toByte()
-              }
-            }
-            totalLines.add(lineBytes)
-          }
-          bitmap.recycle()
+          pageBitmaps.add(bitmap)
+          totalHeight += targetHeight
           page.close()
         }
-
         renderer.close()
         pfd.close()
 
-        // White-space trimming: Find the last line that has at least one black pixel
-        var lastContentLine = totalLines.size
-        for (i in totalLines.size - 1 downTo 0) {
-            val line = totalLines[i]
-            var hasContent = false
-            for (b in line) {
-                if (b.toInt() != 0) {
-                    hasContent = true
-                    break
-                }
-            }
-            if (hasContent) {
-                lastContentLine = i + 1
-                break
-            }
+        // Combine into one bitmap
+        val combinedBitmap = Bitmap.createBitmap(targetWidth, totalHeight, Bitmap.Config.ARGB_8888)
+        val combinedCanvas = Canvas(combinedBitmap)
+        var currentY = 0f
+        for (bm in pageBitmaps) {
+          combinedCanvas.drawBitmap(bm, 0f, currentY, null)
+          currentY += bm.height
+          bm.recycle()
         }
+
+        // 3. Connect to Zebra Printer
+        connection = BluetoothConnection(macAddress)
+        connection.open()
         
-        // Add a small 10px buffer at the bottom
-        val finalLineCount = Math.min(totalLines.size, lastContentLine + 10)
-        val trimmedLines = totalLines.subList(0, finalLineCount)
-
-        val flatBytes = ByteArray(trimmedLines.size * 96)
-        var offset = 0
-        for (line in trimmedLines) {
-          System.arraycopy(line, 0, flatBytes, offset, 96)
-          offset += 96
-        }
+        val zebraPrinter = ZebraPrinterFactory.getInstance(connection)
         
-        // Generate PNG preview base64
-        val previewBase64 = previewBitmap?.let {
-            // Trim the preview bitmap too
-            val trimmedPreview = if (finalLineCount < it.height) {
-                Bitmap.createBitmap(it, 0, 0, it.width, finalLineCount)
-            } else {
-                it
-            }
-            val stream = ByteArrayOutputStream()
-            trimmedPreview.compress(Bitmap.CompressFormat.PNG, 100, stream)
-            val bytes = stream.toByteArray()
-            if (trimmedPreview != it) trimmedPreview.recycle()
-            it.recycle()
-            android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-        } ?: ""
+        // 4. Print Image
+        zebraPrinter.printImage(ZebraImageFactory.getImage(combinedBitmap), 0, 0, targetWidth, totalHeight, false)
+        
+        combinedBitmap.recycle()
+        promise.resolve(true)
 
-        val result = Arguments.createMap().apply {
-          putString("base64Data", android.util.Base64.encodeToString(flatBytes, android.util.Base64.NO_WRAP))
-          putString("previewBase64", previewBase64)
-          putInt("widthBytes", 96)
-          putInt("totalLines", trimmedLines.size)
-        }
-
-        promise.resolve(result)
-      } catch (error: Exception) {
-        promise.reject("PDF_RENDER_ERROR", error.message, error)
+      } catch (e: Exception) {
+        promise.reject("ZEBRA_PRINT_ERROR", e.message, e)
+      } finally {
+        try {
+          connection?.close()
+        } catch (e: Exception) {}
       }
     }.start()
   }
+  /*
+  // Trailing orphaned LX code commented out
+  @ReactMethod
+  fun renderPdfForGrayscalePrinter_Orphaned(payload: ReadableMap, promise: Promise) {
+    // ... logic preserved below in comments
+  }
+  */
 
   private fun buildPdfBytes(payload: BillPayload): ByteArray {
     val document = PdfDocument()
