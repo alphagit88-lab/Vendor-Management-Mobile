@@ -12,25 +12,25 @@ import {
   View,
 } from 'react-native';
 
-import {AuthTextInput} from '../components/auth/AuthTextInput';
-import {PrimaryButton} from '../components/auth/PrimaryButton';
-import {InlineMessage} from '../components/common/InlineMessage';
-import {useLoginScreen} from '../hooks/useLoginScreen';
-import {palette} from '../theme/colors';
-import {radii, shadowPresets} from '../theme/shape';
-import {spacing} from '../theme/spacing';
-import {AuthSession} from '../types/auth';
+import { AuthTextInput } from '../components/auth/AuthTextInput';
+import { PrimaryButton } from '../components/auth/PrimaryButton';
+import { InlineMessage } from '../components/common/InlineMessage';
+import { useLoginScreen } from '../hooks/useLoginScreen';
+import { palette } from '../theme/colors';
+import { radii, shadowPresets } from '../theme/shape';
+import { spacing } from '../theme/spacing';
+import { AuthSession } from '../types/auth';
 
-const logoImage = require('../assets/images/logo.webp');
+const logoImage = require('../assets/images/logo.jpeg');
 
 interface LoginScreenProps {
   onAuthenticated: (session: AuthSession) => void;
 }
 
-export const LoginScreen = ({onAuthenticated}: LoginScreenProps) => {
-  const {height, width} = useWindowDimensions();
+export const LoginScreen = ({ onAuthenticated }: LoginScreenProps) => {
+  const { height, width } = useWindowDimensions();
   const cardWidth = Math.min(Math.max(width - 40, 0), 460);
-  const logoWidth = Math.min(cardWidth * 0.58, 220);
+  const logoWidth = Math.min(cardWidth * 0.4, 160);
   const {
     feedbackMessage,
     formValues,
@@ -60,22 +60,21 @@ export const LoginScreen = ({onAuthenticated}: LoginScreenProps) => {
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}>
-          <View style={[styles.canvas, {minHeight: Math.max(height - 24, 0)}]}>
+          <View style={[styles.canvas, { minHeight: Math.max(height - 24, 0) }]}>
             <View style={styles.backgroundGlowMain} />
             <View style={styles.backgroundGlowTop} />
             <View style={styles.backgroundGlowBottom} />
 
-            <View style={[styles.contentWrapper, {width: cardWidth}]}>
+            <View style={[styles.contentWrapper, { width: cardWidth }]}>
               <View style={styles.brandBlock}>
                 <View style={styles.logoHalo} />
-                <Image
-                  resizeMode="contain"
-                  source={logoImage}
-                  style={[
-                    styles.logo,
-                    {width: logoWidth, height: Math.max(logoWidth * 0.62, 110)},
-                  ]}
-                />
+                <View style={[styles.logoWrapper, { width: logoWidth, height: logoWidth }]}>
+                  <Image
+                    resizeMode="contain"
+                    source={logoImage}
+                    style={styles.logo}
+                  />
+                </View>
                 <View style={styles.brandPill}>
                   <Text style={styles.brandPillLabel}>SUPER VENDOR</Text>
                 </View>
@@ -116,9 +115,9 @@ export const LoginScreen = ({onAuthenticated}: LoginScreenProps) => {
 
                 <Pressable
                   accessibilityRole="checkbox"
-                  accessibilityState={{checked: rememberMe}}
+                  accessibilityState={{ checked: rememberMe }}
                   onPress={toggleRememberMe}
-                  style={({pressed}) => [
+                  style={({ pressed }) => [
                     styles.rememberMeRow,
                     pressed ? styles.rememberMeRowPressed : null,
                   ]}>
@@ -258,7 +257,17 @@ const styles = StyleSheet.create({
   },
   logo: {
     alignSelf: 'center',
+    width: '100%',
+    height: '100%',
+  },
+  logoWrapper: {
+    alignSelf: 'center',
     marginBottom: spacing.md,
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: '#FFFFFF',
+    padding: spacing.xs,
+    ...shadowPresets.soft,
   },
   logoHalo: {
     alignSelf: 'center',

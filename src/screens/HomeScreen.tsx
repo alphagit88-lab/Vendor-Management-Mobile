@@ -49,9 +49,10 @@ import {
   PersonalInventoryItem,
   StoredOrderBill,
   CreateOrderRequest,
+  CreatedOrder,
 } from '../types/order';
 
-type HomeView = 'home' | 'customers' | 'products' | 'settings';
+type HomeView = 'home' | 'customers' | 'products' | 'settings' | 'history';
 type LoadStatus = 'idle' | ContentLoadState;
 type CheckoutState = 'idle' | 'loading';
 type FeedbackTone = 'error' | 'info' | 'success';
@@ -302,6 +303,7 @@ const parseCurrencyInput = (value: string) => {
 
 const backIcon = require('../assets/images/left.png');
 const dropdownIcon = require('../assets/images/down.png');
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const ui = {
   accent: palette.accent,
@@ -408,11 +410,17 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
   const connectedPrinterMacRef = useRef<string | null>(null);
   const bleManagerRef = useRef<BleManager | null>(null);
   const activeBleDeviceRef = useRef<any>(null);
-  const [isHistoryExpanded, setIsHistoryExpanded] = useState(false);
+  const [orderHistory, setOrderHistory] = useState<CreatedOrder[]>([]);
+  const [historyMonth, setHistoryMonth] = useState(new Date().getMonth() + 1);
+  const [historyYear, setHistoryYear] = useState(new Date().getFullYear());
+  const [expandedOrders, setExpandedOrders] = useState<Record<number, boolean>>({});
+  const [historyStatus, setHistoryStatus] = useState<LoadStatus>('idle');
 
   // Signature States
   const [customerSignature, setCustomerSignature] = useState<string | null>(null);
   const [driverSignature, setDriverSignature] = useState<string | null>(null);
+  const [paymentType, setPaymentType] = useState<'Cash' | 'Check' | 'EFT' | 'MO'>('Cash');
+  const [checkNumber, setCheckNumber] = useState('');
   const [signatureModalType, setSignatureModalType] = useState<'customer' | 'driver' | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const authRef = useRef<{
@@ -814,6 +822,20 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
     setProducts(personalInventory);
     setProductsStatus(personalInventory.length ? 'ready' : 'empty');
+  };
+
+  const loadOrderHistory = async (m?: number, y?: number) => {
+    setHistoryStatus('loading');
+    const month = m ?? historyMonth;
+    const year = y ?? historyYear;
+
+    const result = await orderService.getOrders(session.token, month, year);
+    if (result.ok && result.data) {
+      setOrderHistory(result.data);
+      setHistoryStatus('ready');
+    } else {
+      setHistoryStatus('error');
+    }
   };
 
   const selectCustomer = (customer: Customer) => {
@@ -1659,6 +1681,36 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
     }
   };
 
+  const handleGenerateChecklist = async () => {
+    if (latestStoredBill) {
+      // If order already exists, just get the checklist PDF
+      setReceiptActionState('loading');
+      try {
+        const orderId = (latestStoredBill as any).id || (latestStoredBill as any).order_id;
+        const response = await orderService.getOrderChecklist(
+          session.token,
+          orderId,
+          customerSignature,
+          driverSignature
+        );
+        if (response.ok && response.data) {
+          const base64 = await fetchPdfAsBase64(response.data.url);
+          if (base64) {
+            setPdfBase64(base64);
+            setIsBillModalVisible(true);
+          }
+        }
+      } catch (e) {
+        setCheckoutFeedback({ message: 'Error loading checklist', tone: 'error' });
+      } finally {
+        setReceiptActionState('idle');
+      }
+    } else {
+      // If no order exists, create one with checklist flag
+      await handleGenerateBill(true);
+    }
+  };
+
   const printWithSelectedDevice = async (device: BluetoothPrinterDevice) => {
     setIsPrinterPickerVisible(false);
     if (!pendingPrintBill) {
@@ -1689,7 +1741,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
   };
 
 
-  const handleGenerateBill = async () => {
+  const handleGenerateBill = async (isChecklistRequest = false) => {
     setCheckoutFeedback(null); // Clear previous errors
     if (!selectedCustomer || !selectedProducts.length) {
       return;
@@ -1728,6 +1780,9 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
       totalDeposit: containerDepositAmount,
       customerSignature: customerSignature,
       driverSignature: driverSignature,
+      paymentType: paymentType,
+      checkNumber: paymentType === 'Check' ? checkNumber : null,
+      isChecklist: isChecklistRequest
     };
 
     console.log('📦 GENERATING BILL PAYLOAD:', JSON.stringify(payload, null, 2));
@@ -1768,6 +1823,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
     const billData = storedBill ? {
       ...storedBill,
+      id: orderResponse.data.order.id, // INCLUDE ID
       bill_link: storedBill.url,
       order_number: orderResponse.data.order.order_number,
       customer_name: selectedCustomer.name,
@@ -1792,7 +1848,20 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
     });
 
     // AUTO-OPEN PREVIEW
-    const base64 = await fetchPdfAsBase64(storedBill.url);
+    let displayPdfUrl = storedBill.url;
+    if (isChecklistRequest) {
+      const checklistResponse = await orderService.getOrderChecklist(
+        session.token,
+        orderResponse.data.order.id,
+        customerSignature,
+        driverSignature
+      );
+      if (checklistResponse.ok && checklistResponse.data) {
+        displayPdfUrl = checklistResponse.data.url;
+      }
+    }
+
+    const base64 = await fetchPdfAsBase64(displayPdfUrl);
     if (base64) {
       setPdfBase64(base64);
       setIsBillModalVisible(true);
@@ -1834,6 +1903,185 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
         </Text>
       </Pressable>
     </View>
+  );
+
+  const toggleOrderExpansion = (id: number) => {
+    setExpandedOrders(prev => ({
+      ...prev,
+      [id]: !prev[id]
+    }));
+  };
+
+  const openOrderBill = async (orderId: number) => {
+    setReceiptActionState('loading');
+    const response = await orderService.getOrderBill(session.token, orderId);
+    setReceiptActionState('idle');
+    if (response.ok && response.data) {
+      const base64 = await fetchPdfAsBase64(response.data.url);
+      if (base64) {
+        setPdfBase64(base64);
+        setIsBillModalVisible(true);
+      }
+    }
+  };
+
+  const renderHistory = () => (
+    <>
+      <View style={[styles.topBackRow, sectionWidthStyle]}>
+        <Pressable
+          onPress={() => setView('products')}
+          style={styles.backButton}>
+          <Image source={backIcon} style={styles.backButtonIcon} />
+        </Pressable>
+      </View>
+
+      <View style={[styles.sectionCard, sectionWidthStyle]}>
+        <View style={styles.historyHeader}>
+          <View>
+            <Text style={styles.sectionEyebrow}>TRACKING</Text>
+            <Text style={styles.sectionTitle}>Order History</Text>
+          </View>
+          
+          <View style={styles.yearSelector}>
+            <Pressable 
+              onPress={() => {
+                const newYear = historyYear - 1;
+                setHistoryYear(newYear);
+                loadOrderHistory(historyMonth, newYear);
+              }}
+              style={styles.yearArrow}
+            >
+              <Text style={styles.yearArrowText}>{"<"}</Text>
+            </Pressable>
+            <Text style={styles.yearText}>{historyYear}</Text>
+            <Pressable 
+              onPress={() => {
+                const newYear = historyYear + 1;
+                setHistoryYear(newYear);
+                loadOrderHistory(historyMonth, newYear);
+              }}
+              style={styles.yearArrow}
+            >
+              <Text style={styles.yearArrowText}>{">"}</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <ScrollView 
+          horizontal 
+          showsHorizontalScrollIndicator={false} 
+          style={styles.monthStrip}
+          contentContainerStyle={styles.monthStripContent}
+        >
+          {MONTHS.map((month: string, index: number) => {
+            const m = index + 1;
+            const isSelected = historyMonth === m;
+            return (
+              <Pressable
+                key={month}
+                onPress={() => {
+                  setHistoryMonth(m);
+                  loadOrderHistory(m, historyYear);
+                }}
+                style={[
+                  styles.monthPill,
+                  isSelected && styles.monthPillActive
+                ]}
+              >
+                <Text style={[
+                  styles.monthPillLabel,
+                  isSelected && styles.monthPillLabelActive
+                ]}>
+                  {month}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+
+        {historyStatus === 'loading' ? (
+          <ActivityIndicator size="large" color={palette.primaryStrong} style={{ marginVertical: 40 }} />
+        ) : orderHistory.length === 0 ? (
+          <View style={styles.emptyHistory}>
+            <Text style={styles.emptyHistoryText}>No orders found for {MONTHS[historyMonth-1]} {historyYear}.</Text>
+          </View>
+        ) : (
+          <ScrollView style={styles.historyList} showsVerticalScrollIndicator={false}>
+            {orderHistory.map((order) => {
+              const isExpanded = expandedOrders[order.id];
+              return (
+                <View key={order.id} style={styles.historyCard}>
+                  <Pressable 
+                    onPress={() => toggleOrderExpansion(order.id)}
+                    style={styles.historyCardHeader}
+                  >
+                    <View style={styles.historyCardInfo}>
+                      <View style={styles.historyCardDateRow}>
+                        <Text style={styles.historyCardDate}>
+                          {new Date(order.created_at).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
+                        </Text>
+                        <View style={styles.historyStatusBadge}>
+                          <Text style={styles.historyStatusText}>{order.status.toUpperCase()}</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.historyCardInvoice}>{order.order_number}</Text>
+                      <Text style={styles.historyCardCustomer} numberOfLines={1}>{order.customer_name}</Text>
+                    </View>
+                    
+                    <View style={styles.historyCardRight}>
+                      <Text style={styles.historyCardAmount}>${parseFloat(order.total_amount).toFixed(2)}</Text>
+                      <View style={[styles.historyExpandBtn, isExpanded && styles.historyExpandBtnActive]}>
+                        <Text style={[styles.historyExpandIcon, isExpanded && styles.historyExpandIconActive]}>
+                          {isExpanded ? '▲' : '▼'}
+                        </Text>
+                      </View>
+                    </View>
+                  </Pressable>
+                  
+                  {isExpanded && (
+                    <View style={styles.historyCardDetails}>
+                      <View style={styles.historyItemsHeader}>
+                        <Text style={[styles.historyItemsHeaderText, { flex: 2 }]}>PRODUCT</Text>
+                        <Text style={[styles.historyItemsHeaderText, { flex: 0.5, textAlign: 'center' }]}>QTY</Text>
+                        <Text style={[styles.historyItemsHeaderText, { flex: 1, textAlign: 'right' }]}>SUBTOTAL</Text>
+                      </View>
+                      {order.items?.map((item: any, idx: number) => (
+                        <View key={`${order.id}-item-${idx}`} style={styles.historyItemRow}>
+                          <View style={{ flex: 2 }}>
+                            <Text style={styles.historyItemName} numberOfLines={1}>{item.item_name}</Text>
+                            <Text style={styles.historyItemSku}>{item.item_number || 'N/A'}</Text>
+                          </View>
+                          <Text style={styles.historyItemQty}>{item.quantity}</Text>
+                          <Text style={styles.historyItemPrice}>${parseFloat(item.subtotal).toFixed(2)}</Text>
+                        </View>
+                      ))}
+                      <View style={styles.historyCardFooter}>
+                         <View style={styles.historyFooterRow}>
+                            <Text style={styles.historyFooterLabel}>Subtotal</Text>
+                            <Text style={styles.historyFooterValue}>${parseFloat(order.total_amount).toFixed(2)}</Text>
+                         </View>
+                         {parseFloat(order.total_deposit || '0') > 0 && (
+                            <View style={styles.historyFooterRow}>
+                              <Text style={styles.historyFooterLabel}>Deposit</Text>
+                              <Text style={styles.historyFooterValue}>+${parseFloat(order.total_deposit).toFixed(2)}</Text>
+                            </View>
+                         )}
+                         {parseFloat(order.total_credits || '0') > 0 && (
+                            <View style={styles.historyFooterRow}>
+                              <Text style={styles.historyFooterLabel}>Credits</Text>
+                              <Text style={styles.historyFooterValue}>-${parseFloat(order.total_credits).toFixed(2)}</Text>
+                            </View>
+                         )}
+                      </View>
+                    </View>
+                  )}
+                </View>
+              );
+            })}
+          </ScrollView>
+        )}
+      </View>
+    </>
   );
 
   const renderSettings = () => (
@@ -2197,6 +2445,18 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
               order summary stays hidden until you open it.
             </Text>
           </View>
+        </View>
+
+        <View style={styles.headerRightActions}>
+          <Pressable
+            onPress={() => {
+              setView('history');
+              loadOrderHistory();
+            }}
+            style={styles.historyPill}
+          >
+            <Text style={styles.historyPillLabel}>Order History</Text>
+          </Pressable>
           <View style={styles.inventoryPill}>
             <Text style={styles.inventoryPillLabel}>
               Personal inventory only
@@ -2413,7 +2673,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                           </Text>
                         )}
 
-                        <View style={styles.productCardActions}>
+                        <View style={[styles.productCardActions, { gap: 4 }]}>
                           <Pressable
                             disabled={quantity === 0}
                             onPress={event => {
@@ -2421,16 +2681,25 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                               updateQuantity(product, -1);
                             }}
                             style={({ pressed }) => [
-                              styles.productStepButton,
-                              quantity === 0
-                                ? styles.productStepButtonDisabled
-                                : null,
+                              styles.quantityButton,
+                              quantity === 0 ? { opacity: 0.3 } : null,
                               pressed && quantity > 0
-                                ? styles.productStepButtonPressed
+                                ? styles.quantityButtonPressed
                                 : null,
                             ]}>
-                            <Text style={styles.productStepButtonLabel}>
-                              -1
+                            <Text style={styles.quantityButtonLabel}>-</Text>
+                          </Pressable>
+
+                          <Pressable
+                            onPress={event => {
+                              event.stopPropagation();
+                              if (remainingQuantity > 0 || quantity > 0) {
+                                openQuantityModal(product);
+                              }
+                            }}
+                            style={{ paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center' }}>
+                            <Text style={{ fontSize: 18, fontWeight: '900', color: ui.textHeading, minWidth: 24, textAlign: 'center' }}>
+                              {quantity}
                             </Text>
                           </Pressable>
 
@@ -2441,37 +2710,13 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                               updateQuantity(product, 1);
                             }}
                             style={({ pressed }) => [
-                              styles.productStepButton,
-                              remainingQuantity === 0
-                                ? styles.productStepButtonDisabled
-                                : null,
+                              styles.quantityButton,
+                              remainingQuantity === 0 ? { opacity: 0.3 } : null,
                               pressed && remainingQuantity > 0
-                                ? styles.productStepButtonPressed
+                                ? styles.quantityButtonPressed
                                 : null,
                             ]}>
-                            <Text style={styles.productStepButtonLabel}>
-                              +1
-                            </Text>
-                          </Pressable>
-
-                          <Pressable
-                            disabled={remainingQuantity === 0}
-                            onPress={event => {
-                              event.stopPropagation();
-                              openQuantityModal(product);
-                            }}
-                            style={({ pressed }) => [
-                              styles.productCustomAddButton,
-                              remainingQuantity === 0
-                                ? styles.productCustomAddButtonDisabled
-                                : null,
-                              pressed && remainingQuantity > 0
-                                ? styles.productCustomAddButtonPressed
-                                : null,
-                            ]}>
-                            <Text style={styles.productCustomAddButtonLabel}>
-                              Add
-                            </Text>
+                            <Text style={styles.quantityButtonLabel}>+</Text>
                           </Pressable>
                         </View>
                       </View>
@@ -2838,6 +3083,44 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                   </View>
                 </View>
 
+                {/* Payment Selection */}
+                <View style={styles.paymentSection}>
+                  <Text style={styles.paymentLabel}>Payment Type</Text>
+                  <View style={styles.paymentOptions}>
+                    {['Cash', 'Check', 'EFT', 'MO'].map((type) => (
+                      <TouchableOpacity
+                        key={type}
+                        onPress={() => setPaymentType(type as any)}
+                        style={[
+                          styles.paymentOption,
+                          paymentType === type ? styles.paymentOptionSelected : null
+                        ]}>
+                        <View style={[
+                          styles.radioButton,
+                          paymentType === type ? styles.radioButtonSelected : null
+                        ]}>
+                          {paymentType === type && <View style={styles.radioButtonInner} />}
+                        </View>
+                        <Text style={[
+                          styles.paymentOptionText,
+                          paymentType === type ? styles.paymentOptionTextSelected : null
+                        ]}>
+                          {type}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  {paymentType === 'Check' && (
+                    <TextInput
+                      placeholder="Enter Check Number"
+                      value={checkNumber}
+                      onChangeText={setCheckNumber}
+                      style={styles.checkNumberInput}
+                      placeholderTextColor={ui.textMuted}
+                    />
+                  )}
+                </View>
+
                 <View style={styles.payableBar}>
                   <View style={styles.payableBarTextWrap}>
                     <Text style={styles.summaryFooterLabel}>Total Payable</Text>
@@ -2848,7 +3131,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
                   <Pressable
                     disabled={generateBillDisabled}
-                    onPress={handleGenerateBill}
+                    onPress={() => handleGenerateBill()}
                     style={({ pressed }) => [
                       styles.generateBillButton,
                       isCompactLayout ? styles.generateBillButtonFull : null,
@@ -2863,9 +3146,29 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                       <ActivityIndicator color={palette.white} />
                     ) : (
                       <Text style={styles.generateBillButtonLabel}>
-                        Generate Bill
+                        Generate Invoice
                       </Text>
                     )}
+                  </Pressable>
+
+                  <Pressable
+                    disabled={generateBillDisabled || receiptActionState === 'loading'}
+                    onPress={handleGenerateChecklist}
+                    style={({ pressed }) => [
+                      styles.generateChecklistButton,
+                      isCompactLayout ? styles.generateBillButtonFull : null,
+                      (generateBillDisabled || receiptActionState === 'loading')
+                        ? styles.generateBillButtonDisabled
+                        : null,
+                      pressed && receiptActionState !== 'loading'
+                        ? styles.generateBillButtonPressed
+                        : null,
+                    ]}>
+                    <Text style={styles.generateBillButtonLabel}>
+                      {receiptActionState === 'loading'
+                        ? 'CREATING...'
+                        : 'Generate Checklist'}
+                    </Text>
                   </Pressable>
                 </View>
               </View>
@@ -3243,6 +3546,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
         {view === 'customers' ? renderCustomers() : null}
         {view === 'products' ? renderProducts() : null}
         {view === 'settings' ? renderSettings() : null}
+        {view === 'history' ? renderHistory() : null}
       </ScreenContainer>
 
       <Modal
@@ -3683,13 +3987,12 @@ const styles = StyleSheet.create({
     ...shadowPresets.card,
   },
   inventoryPill: {
-    alignSelf: 'flex-start',
     backgroundColor: ui.highlightSoft,
     borderRadius: radii.pill,
-    marginLeft: 'auto',
-    marginTop: spacing.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   inventoryPillLabel: {
     color: ui.accentStrong,
@@ -3983,9 +4286,254 @@ const styles = StyleSheet.create({
   },
   placeOrdersLabel: {
     color: palette.white,
-    fontSize: 19,
-    fontWeight: '900',
-    letterSpacing: 0.8,
+    fontSize: 16,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+  },
+  headerRightActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.lg,
+    paddingHorizontal: 2,
+    width: '100%',
+  },
+  historyPill: {
+    backgroundColor: palette.primaryStrong,
+    borderRadius: radii.pill,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    minHeight: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 1,
+    elevation: 1,
+  },
+  historyPillLabel: {
+    color: palette.white,
+    fontSize: 11,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  filterContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.gray50,
+    borderRadius: 8,
+    padding: 4,
+  },
+  filterArrow: {
+    paddingHorizontal: 8,
+  },
+  filterArrowText: {
+    fontSize: 16,
+    color: palette.blue,
+    fontWeight: 'bold',
+  },
+  historyHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+  },
+  yearSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.gray100,
+    borderRadius: 20,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  yearArrow: {
+    padding: 4,
+  },
+  yearArrowText: {
+    fontSize: 18,
+    color: palette.primaryStrong,
+    fontWeight: 'bold',
+  },
+  yearText: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: palette.gray900,
+    marginHorizontal: 8,
+  },
+  monthStrip: {
+    marginBottom: spacing.lg,
+  },
+  monthStripContent: {
+    paddingHorizontal: 2,
+    gap: 8,
+  },
+  monthPill: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: palette.gray50,
+    borderWidth: 1,
+    borderColor: palette.gray100,
+  },
+  monthPillActive: {
+    backgroundColor: palette.primaryStrong,
+    borderColor: palette.primaryStrong,
+  },
+  monthPillLabel: {
+    fontSize: 13,
+    color: palette.gray600,
+    fontWeight: '600',
+  },
+  monthPillLabelActive: {
+    color: palette.white,
+  },
+  historyList: {
+    marginTop: 16,
+  },
+  historyCard: {
+    backgroundColor: palette.white,
+    borderRadius: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: palette.gray100,
+    ...shadowPresets.card,
+  },
+  historyCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    padding: 16,
+  },
+  historyCardInfo: {
+    flex: 1,
+  },
+  historyCardDateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+    gap: 8,
+  },
+  historyCardDate: {
+    fontSize: 12,
+    color: palette.gray500,
+    fontWeight: '600',
+  },
+  historyStatusBadge: {
+    backgroundColor: '#E6F4EA',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  historyStatusText: {
+    fontSize: 9,
+    color: '#1E8E3E',
+    fontWeight: 'bold',
+  },
+  historyCardInvoice: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: palette.gray900,
+  },
+  historyCardCustomer: {
+    fontSize: 13,
+    color: palette.gray600,
+    marginTop: 2,
+  },
+  historyCardRight: {
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+  },
+  historyCardAmount: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: palette.primaryStrong,
+  },
+  historyExpandBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: palette.gray50,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  historyExpandBtnActive: {
+    backgroundColor: palette.primarySoft,
+  },
+  historyExpandIcon: {
+    fontSize: 12,
+    color: palette.gray400,
+  },
+  historyExpandIconActive: {
+    color: palette.primaryStrong,
+  },
+  historyCardDetails: {
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: palette.gray100,
+    backgroundColor: '#FAFBF9',
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
+  },
+  historyItemSku: {
+    fontSize: 10,
+    color: palette.gray400,
+  },
+  historyCardFooter: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: palette.gray100,
+  },
+  historyFooterRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  historyFooterLabel: {
+    fontSize: 12,
+    color: palette.gray500,
+  },
+  historyFooterValue: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    color: palette.gray900,
+  },
+  historyItemsHeader: {
+    flexDirection: 'row',
+    marginBottom: 8,
+  },
+  historyItemsHeaderText: {
+    fontSize: 10,
+    color: palette.gray500,
+  },
+  historyItemRow: {
+    flexDirection: 'row',
+    marginBottom: 4,
+  },
+  historyItemName: {
+    fontSize: 11,
+    color: palette.gray700,
+    flex: 2,
+  },
+  historyItemQty: {
+    fontSize: 11,
+    color: palette.gray700,
+    flex: 0.5,
+    textAlign: 'center',
+  },
+  historyItemPrice: {
+    fontSize: 11,
+    color: palette.gray700,
+    flex: 1,
+    textAlign: 'right',
+  },
+  emptyHistory: {
+    padding: 40,
+    alignItems: 'center',
+  },
+  emptyHistoryText: {
+    color: palette.gray400,
+    fontSize: 14,
   },
   plusHorizontal: {
     backgroundColor: palette.white,
@@ -5251,5 +5799,82 @@ const styles = StyleSheet.create({
     fontSize: 8,
     fontWeight: '800',
     textTransform: 'uppercase',
+  },
+  paymentSection: {
+    marginTop: spacing.xl,
+    marginBottom: spacing.xl,
+    paddingHorizontal: spacing.sm,
+  },
+  paymentLabel: {
+    color: ui.darkTextMuted,
+    fontSize: 16,
+    fontWeight: '900',
+    marginBottom: spacing.md,
+  },
+  paymentOptions: {
+    gap: spacing.sm,
+  },
+  paymentOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.white,
+    borderColor: ui.cardBorder,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    padding: spacing.md,
+  },
+  paymentOptionSelected: {
+    borderColor: ui.highlight,
+    backgroundColor: ui.highlightSoft,
+  },
+  paymentOptionText: {
+    color: ui.textBody,
+    fontSize: 14,
+    fontWeight: '700',
+    marginLeft: spacing.md,
+  },
+  paymentOptionTextSelected: {
+    color: ui.accentStrong,
+    fontWeight: '900',
+  },
+  radioButton: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: ui.cardBorderStrong,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  radioButtonSelected: {
+    borderColor: ui.highlight,
+  },
+  radioButtonInner: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: ui.highlight,
+  },
+  checkNumberInput: {
+    backgroundColor: ui.softSurface,
+    borderColor: ui.cardBorder,
+    borderWidth: 1,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    marginTop: spacing.sm,
+    color: ui.textHeading,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  generateChecklistButton: {
+    alignItems: 'center',
+    backgroundColor: ui.accentStrong,
+    borderRadius: radii.pill,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    minHeight: 56,
+    marginTop: spacing.xs,
+    paddingHorizontal: spacing.xl,
+    ...shadowPresets.card,
   },
 });

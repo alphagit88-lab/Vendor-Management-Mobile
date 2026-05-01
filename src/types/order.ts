@@ -61,6 +61,9 @@ export interface CreateOrderRequest {
   totalDeposit: number;
   customerSignature?: string | null;
   driverSignature?: string | null;
+  paymentType?: string | null;
+  checkNumber?: string | null;
+  isChecklist?: boolean;
 }
 
 export interface CreateOrderItem {
@@ -72,10 +75,21 @@ export interface CreateOrderItem {
   unitDiscount: number;
 }
 
+export interface HistoryOrderItem {
+  id: number;
+  item_id: number;
+  item_number: string | null;
+  item_name: string;
+  quantity: number;
+  unit_price: string;
+  subtotal: string;
+}
+
 export interface CreatedOrder {
   id: number;
   order_number: string;
   customer_id: number;
+  customer_name?: string;
   user_id: number;
   total_amount: string;
   status: string;
@@ -85,6 +99,9 @@ export interface CreatedOrder {
   load_number: string | null;
   total_credits: string;
   total_deposit: string;
+  payment_type: string | null;
+  check_number: string | null;
+  items?: HistoryOrderItem[];
 }
 
 export interface StoredOrderBill {

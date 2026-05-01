@@ -120,6 +120,9 @@ export const orderService = {
           total_deposit: request.totalDeposit,
           customerSignature: request.customerSignature,
           driverSignature: request.driverSignature,
+          payment_type: request.paymentType,
+          check_number: request.checkNumber,
+          is_checklist: request.isChecklist,
         }),
       });
 
@@ -184,6 +187,47 @@ export const orderService = {
       };
     }
   },
+  
+  async getOrderChecklist(
+    token: string,
+    orderId: number,
+    customerSignature?: string | null,
+    driverSignature?: string | null,
+  ): Promise<ServiceResult<{ url: string; file_name: string }>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/orders/${orderId}/checklist`, {
+        method: 'POST',
+        headers: getHeaders(token, true),
+        body: JSON.stringify({
+          customerSignature,
+          driverSignature
+        })
+      });
+
+      const payload = await readJsonResponse<EntityResponse<{ url: string; file_name: string }>>(
+        response,
+      );
+
+      if (!response.ok || !payload?.success || !payload.data) {
+        return {
+          ok: false,
+          message:
+            payload?.message ??
+            `Request failed with status ${response.status}.`,
+        };
+      }
+
+      return {
+        ok: true,
+        data: payload.data,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: getErrorMessage(error),
+      };
+    }
+  },
 
   getCustomers(token: string) {
     return getCollection<Customer>('customers', token);
@@ -195,5 +239,13 @@ export const orderService = {
 
   getInventory(token: string) {
     return getCollection<InventoryItem>('inventory', token);
+  },
+
+  getOrders(token: string, month?: number, year?: number) {
+    let endpoint = 'orders';
+    if (month !== undefined && year !== undefined) {
+      endpoint += `?month=${month}&year=${year}`;
+    }
+    return getCollection<CreatedOrder>(endpoint, token);
   },
 };
