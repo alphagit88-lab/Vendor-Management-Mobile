@@ -123,6 +123,7 @@ export const orderService = {
           payment_type: request.paymentType,
           check_number: request.checkNumber,
           is_checklist: request.isChecklist,
+          clientTimestamp: request.clientTimestamp,
         }),
       });
 
@@ -193,6 +194,7 @@ export const orderService = {
     orderId: number,
     customerSignature?: string | null,
     driverSignature?: string | null,
+    clientTimestamp?: string | null,
   ): Promise<ServiceResult<{ url: string; file_name: string }>> {
     try {
       const response = await fetch(`${API_BASE_URL}/orders/${orderId}/checklist`, {
@@ -200,7 +202,8 @@ export const orderService = {
         headers: getHeaders(token, true),
         body: JSON.stringify({
           customerSignature,
-          driverSignature
+          driverSignature,
+          clientTimestamp
         })
       });
 

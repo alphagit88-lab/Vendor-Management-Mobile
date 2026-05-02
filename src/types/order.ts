@@ -64,6 +64,7 @@ export interface CreateOrderRequest {
   paymentType?: string | null;
   checkNumber?: string | null;
   isChecklist?: boolean;
+  clientTimestamp?: string | null;
 }
 
 export interface CreateOrderItem {
@@ -101,6 +102,7 @@ export interface CreatedOrder {
   total_deposit: string;
   payment_type: string | null;
   check_number: string | null;
+  client_timestamp: string | null;
   items?: HistoryOrderItem[];
 }
 

@@ -610,9 +610,11 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
   const containerDepositAmount = parseCurrencyInput(containerDepositInput);
   const totalPayable = itemSubtotal - creditMemoAmount + containerDepositAmount;
   const generateBillDisabled =
-    !selectedProducts.length || checkoutState === 'loading' || totalPayable < 0;
-  const receiptActionDisabled =
-    !latestStoredBill || receiptActionState !== 'idle';
+    checkoutState === 'loading' ||
+    receiptActionState === 'loading' ||
+    !selectedCustomer ||
+    !selectedProducts.length ||
+    totalPayable < 0;
   const selectedItemsLabel =
     selectedProducts.length === 1
       ? '1 item selected'
@@ -857,6 +859,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
   const updateQuantity = (product: PersonalInventoryItem, delta: number) => {
     setCheckoutFeedback(null);
+    setLatestStoredBill(null);
     setSelectedQuantities(current => {
       const maxOrderableQuantity = getMaxOrderableQuantity(
         product.heldQuantity,
@@ -912,6 +915,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
   const removeProduct = (productId: number) => {
     setCheckoutFeedback(null);
+    setLatestStoredBill(null);
     setSelectedQuantities(current => {
       if (!(productId in current)) {
         return current;
@@ -925,11 +929,13 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
   const setCreditValue = (value: string) => {
     setCheckoutFeedback(null);
+    setLatestStoredBill(null);
     setCreditMemoInput(sanitizeCurrencyInput(value));
   };
 
   const setDepositValue = (value: string) => {
     setCheckoutFeedback(null);
+    setLatestStoredBill(null);
     setContainerDepositInput(sanitizeCurrencyInput(value));
   };
 
@@ -1691,7 +1697,8 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
           session.token,
           orderId,
           customerSignature,
-          driverSignature
+          driverSignature,
+          new Date().toISOString()
         );
         if (response.ok && response.data) {
           const base64 = await fetchPdfAsBase64(response.data.url);
@@ -1743,22 +1750,24 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
   const handleGenerateBill = async (isChecklistRequest = false) => {
     setCheckoutFeedback(null); // Clear previous errors
-    if (!selectedCustomer || !selectedProducts.length) {
+    const generateBillDisabled =
+      checkoutState === 'loading' ||
+      receiptActionState === 'loading' ||
+      !selectedCustomer ||
+      !selectedProducts.length ||
+      totalPayable < 0;
+
+    if (generateBillDisabled) {
       return;
     }
 
-    if (totalPayable < 0) {
-      setCheckoutFeedback({
-        message: 'Total payable cannot be negative. Adjust credits or deposit.',
-        tone: 'error',
-      });
-      return;
+    if (isChecklistRequest) {
+      setReceiptActionState('loading');
+    } else {
+      setCheckoutState('loading');
     }
-
-    setCheckoutState('loading');
     setCheckoutFeedback(null);
     setLatestStoredBill(null);
-    setReceiptActionState('idle');
 
     const payload: CreateOrderRequest = {
       customerId: selectedCustomer.id,
@@ -1782,7 +1791,8 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
       driverSignature: driverSignature,
       paymentType: paymentType,
       checkNumber: paymentType === 'Check' ? checkNumber : null,
-      isChecklist: isChecklistRequest
+      isChecklist: isChecklistRequest,
+      clientTimestamp: new Date().toISOString()
     };
 
     console.log('📦 GENERATING BILL PAYLOAD:', JSON.stringify(payload, null, 2));
@@ -1816,10 +1826,14 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
     }
 
     setCheckoutState('idle');
-    setSelectedQuantities({});
-    setCreditMemoInput('0');
-    setContainerDepositInput('0');
-    setIsSummaryVisible(false);
+    setReceiptActionState('idle');
+
+    if (!isChecklistRequest) {
+      setSelectedQuantities({});
+      setCreditMemoInput('0');
+      setContainerDepositInput('0');
+      setIsSummaryVisible(false);
+    }
 
     const billData = storedBill ? {
       ...storedBill,
@@ -1941,9 +1955,9 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
             <Text style={styles.sectionEyebrow}>TRACKING</Text>
             <Text style={styles.sectionTitle}>Order History</Text>
           </View>
-          
+
           <View style={styles.yearSelector}>
-            <Pressable 
+            <Pressable
               onPress={() => {
                 const newYear = historyYear - 1;
                 setHistoryYear(newYear);
@@ -1954,7 +1968,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
               <Text style={styles.yearArrowText}>{"<"}</Text>
             </Pressable>
             <Text style={styles.yearText}>{historyYear}</Text>
-            <Pressable 
+            <Pressable
               onPress={() => {
                 const newYear = historyYear + 1;
                 setHistoryYear(newYear);
@@ -1967,9 +1981,9 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
           </View>
         </View>
 
-        <ScrollView 
-          horizontal 
-          showsHorizontalScrollIndicator={false} 
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
           style={styles.monthStrip}
           contentContainerStyle={styles.monthStripContent}
         >
@@ -2003,7 +2017,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
           <ActivityIndicator size="large" color={palette.primaryStrong} style={{ marginVertical: 40 }} />
         ) : orderHistory.length === 0 ? (
           <View style={styles.emptyHistory}>
-            <Text style={styles.emptyHistoryText}>No orders found for {MONTHS[historyMonth-1]} {historyYear}.</Text>
+            <Text style={styles.emptyHistoryText}>No orders found for {MONTHS[historyMonth - 1]} {historyYear}.</Text>
           </View>
         ) : (
           <ScrollView style={styles.historyList} showsVerticalScrollIndicator={false}>
@@ -2011,23 +2025,23 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
               const isExpanded = expandedOrders[order.id];
               return (
                 <View key={order.id} style={styles.historyCard}>
-                  <Pressable 
+                  <Pressable
                     onPress={() => toggleOrderExpansion(order.id)}
                     style={styles.historyCardHeader}
                   >
                     <View style={styles.historyCardInfo}>
                       <View style={styles.historyCardDateRow}>
                         <Text style={styles.historyCardDate}>
-                          {new Date(order.created_at).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
+                          {new Date(order.client_timestamp || order.created_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
                         </Text>
-                        <View style={styles.historyStatusBadge}>
+                        {/* <View style={styles.historyStatusBadge}>
                           <Text style={styles.historyStatusText}>{order.status.toUpperCase()}</Text>
-                        </View>
+                        </View> */}
                       </View>
                       <Text style={styles.historyCardInvoice}>{order.order_number}</Text>
                       <Text style={styles.historyCardCustomer} numberOfLines={1}>{order.customer_name}</Text>
                     </View>
-                    
+
                     <View style={styles.historyCardRight}>
                       <Text style={styles.historyCardAmount}>${parseFloat(order.total_amount).toFixed(2)}</Text>
                       <View style={[styles.historyExpandBtn, isExpanded && styles.historyExpandBtnActive]}>
@@ -2037,7 +2051,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                       </View>
                     </View>
                   </Pressable>
-                  
+
                   {isExpanded && (
                     <View style={styles.historyCardDetails}>
                       <View style={styles.historyItemsHeader}>
@@ -2056,22 +2070,22 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                         </View>
                       ))}
                       <View style={styles.historyCardFooter}>
-                         <View style={styles.historyFooterRow}>
-                            <Text style={styles.historyFooterLabel}>Subtotal</Text>
-                            <Text style={styles.historyFooterValue}>${parseFloat(order.total_amount).toFixed(2)}</Text>
-                         </View>
-                         {parseFloat(order.total_deposit || '0') > 0 && (
-                            <View style={styles.historyFooterRow}>
-                              <Text style={styles.historyFooterLabel}>Deposit</Text>
-                              <Text style={styles.historyFooterValue}>+${parseFloat(order.total_deposit).toFixed(2)}</Text>
-                            </View>
-                         )}
-                         {parseFloat(order.total_credits || '0') > 0 && (
-                            <View style={styles.historyFooterRow}>
-                              <Text style={styles.historyFooterLabel}>Credits</Text>
-                              <Text style={styles.historyFooterValue}>-${parseFloat(order.total_credits).toFixed(2)}</Text>
-                            </View>
-                         )}
+                        <View style={styles.historyFooterRow}>
+                          <Text style={styles.historyFooterLabel}>Subtotal</Text>
+                          <Text style={styles.historyFooterValue}>${parseFloat(order.total_amount).toFixed(2)}</Text>
+                        </View>
+                        {parseFloat(order.total_deposit || '0') > 0 && (
+                          <View style={styles.historyFooterRow}>
+                            <Text style={styles.historyFooterLabel}>Deposit</Text>
+                            <Text style={styles.historyFooterValue}>+${parseFloat(order.total_deposit).toFixed(2)}</Text>
+                          </View>
+                        )}
+                        {parseFloat(order.total_credits || '0') > 0 && (
+                          <View style={styles.historyFooterRow}>
+                            <Text style={styles.historyFooterLabel}>Credits</Text>
+                            <Text style={styles.historyFooterValue}>-${parseFloat(order.total_credits).toFixed(2)}</Text>
+                          </View>
+                        )}
                       </View>
                     </View>
                   )}
@@ -2673,50 +2687,69 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                           </Text>
                         )}
 
-                        <View style={[styles.productCardActions, { gap: 4 }]}>
-                          <Pressable
-                            disabled={quantity === 0}
-                            onPress={event => {
-                              event.stopPropagation();
-                              updateQuantity(product, -1);
-                            }}
-                            style={({ pressed }) => [
-                              styles.quantityButton,
-                              quantity === 0 ? { opacity: 0.3 } : null,
-                              pressed && quantity > 0
-                                ? styles.quantityButtonPressed
-                                : null,
-                            ]}>
-                            <Text style={styles.quantityButtonLabel}>-</Text>
-                          </Pressable>
+                        <View style={[styles.productCardActions, { gap: 6 }]}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                            <Pressable
+                              disabled={quantity === 0}
+                              onPress={event => {
+                                event.stopPropagation();
+                                updateQuantity(product, -1);
+                              }}
+                              style={({ pressed }) => [
+                                styles.quantityButton,
+                                quantity === 0 ? { opacity: 0.3 } : null,
+                                pressed && quantity > 0
+                                  ? styles.quantityButtonPressed
+                                  : null,
+                              ]}>
+                              <Text style={styles.quantityButtonLabel}>-</Text>
+                            </Pressable>
 
-                          <Pressable
-                            onPress={event => {
-                              event.stopPropagation();
-                              if (remainingQuantity > 0 || quantity > 0) {
-                                openQuantityModal(product);
-                              }
-                            }}
-                            style={{ paddingHorizontal: 8, alignItems: 'center', justifyContent: 'center' }}>
-                            <Text style={{ fontSize: 18, fontWeight: '900', color: ui.textHeading, minWidth: 24, textAlign: 'center' }}>
+                            <Text
+                              style={{
+                                fontSize: 16,
+                                fontWeight: '900',
+                                color: ui.textHeading,
+                                minWidth: 20,
+                                textAlign: 'center',
+                              }}>
                               {quantity}
                             </Text>
-                          </Pressable>
+
+                            <Pressable
+                              disabled={remainingQuantity === 0}
+                              onPress={event => {
+                                event.stopPropagation();
+                                updateQuantity(product, 1);
+                              }}
+                              style={({ pressed }) => [
+                                styles.quantityButton,
+                                remainingQuantity === 0
+                                  ? { opacity: 0.3 }
+                                  : null,
+                                pressed && remainingQuantity > 0
+                                  ? styles.quantityButtonPressed
+                                  : null,
+                              ]}>
+                              <Text style={styles.quantityButtonLabel}>+</Text>
+                            </Pressable>
+                          </View>
 
                           <Pressable
-                            disabled={remainingQuantity === 0}
+                            disabled={remainingQuantity === 0 && quantity === 0}
                             onPress={event => {
                               event.stopPropagation();
-                              updateQuantity(product, 1);
+                              openQuantityModal(product);
                             }}
                             style={({ pressed }) => [
-                              styles.quantityButton,
-                              remainingQuantity === 0 ? { opacity: 0.3 } : null,
-                              pressed && remainingQuantity > 0
-                                ? styles.quantityButtonPressed
+                              styles.productCustomAddButton,
+                              remainingQuantity === 0 && quantity === 0
+                                ? styles.productCustomAddButtonDisabled
                                 : null,
+                              pressed ? styles.productCustomAddButtonPressed : null,
+                              { minWidth: 48, paddingHorizontal: 6 }
                             ]}>
-                            <Text style={styles.quantityButtonLabel}>+</Text>
+                            <Text style={styles.productCustomAddButtonLabel}>ADD</Text>
                           </Pressable>
                         </View>
                       </View>
@@ -3022,7 +3055,10 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                         <Text style={styles.signatureLabel}>Driver</Text>
                         {driverSignature ? (
                           <TouchableOpacity
-                            onPress={() => setDriverSignature(null)}
+                            onPress={() => {
+                              setDriverSignature(null);
+                              setLatestStoredBill(null);
+                            }}
                             style={styles.signatureClearButton}>
                             <Text style={styles.signatureClearButtonLabel}>✕</Text>
                           </TouchableOpacity>
@@ -3054,7 +3090,10 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                         <Text style={styles.signatureLabel}>Customer</Text>
                         {customerSignature ? (
                           <TouchableOpacity
-                            onPress={() => setCustomerSignature(null)}
+                            onPress={() => {
+                              setCustomerSignature(null);
+                              setLatestStoredBill(null);
+                            }}
                             style={styles.signatureClearButton}>
                             <Text style={styles.signatureClearButtonLabel}>✕</Text>
                           </TouchableOpacity>
@@ -3090,7 +3129,10 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                     {['Cash', 'Check', 'EFT', 'MO'].map((type) => (
                       <TouchableOpacity
                         key={type}
-                        onPress={() => setPaymentType(type as any)}
+                        onPress={() => {
+                          setPaymentType(type as any);
+                          setLatestStoredBill(null);
+                        }}
                         style={[
                           styles.paymentOption,
                           paymentType === type ? styles.paymentOptionSelected : null
@@ -3152,23 +3194,25 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                   </Pressable>
 
                   <Pressable
-                    disabled={generateBillDisabled || receiptActionState === 'loading'}
+                    disabled={generateBillDisabled}
                     onPress={handleGenerateChecklist}
                     style={({ pressed }) => [
                       styles.generateChecklistButton,
                       isCompactLayout ? styles.generateBillButtonFull : null,
-                      (generateBillDisabled || receiptActionState === 'loading')
+                      generateBillDisabled
                         ? styles.generateBillButtonDisabled
                         : null,
-                      pressed && receiptActionState !== 'loading'
+                      pressed && !generateBillDisabled
                         ? styles.generateBillButtonPressed
                         : null,
                     ]}>
-                    <Text style={styles.generateBillButtonLabel}>
-                      {receiptActionState === 'loading'
-                        ? 'CREATING...'
-                        : 'Generate Checklist'}
-                    </Text>
+                    {receiptActionState === 'loading' ? (
+                      <ActivityIndicator color={palette.white} />
+                    ) : (
+                      <Text style={styles.generateBillButtonLabel}>
+                        Generate Checklist
+                      </Text>
+                    )}
                   </Pressable>
                 </View>
               </View>
@@ -3651,6 +3695,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
           } else {
             setCustomerSignature(base64);
           }
+          setLatestStoredBill(null);
         }}
         title={signatureModalType === 'driver' ? 'Driver Signature' : 'Customer Signature'}
       />
