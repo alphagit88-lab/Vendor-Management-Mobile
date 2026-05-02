@@ -21,7 +21,7 @@ import { radii, shadowPresets } from '../theme/shape';
 import { spacing } from '../theme/spacing';
 import { AuthSession } from '../types/auth';
 
-const logoImage = require('../assets/images/logo.jpeg');
+const logoImage = require('../assets/images/lgoNewApp.jpg');
 
 interface LoginScreenProps {
   onAuthenticated: (session: AuthSession) => void;
@@ -70,13 +70,13 @@ export const LoginScreen = ({ onAuthenticated }: LoginScreenProps) => {
                 <View style={styles.logoHalo} />
                 <View style={[styles.logoWrapper, { width: logoWidth, height: logoWidth }]}>
                   <Image
-                    resizeMode="contain"
+                    resizeMode="cover"
                     source={logoImage}
                     style={styles.logo}
                   />
                 </View>
                 <View style={styles.brandPill}>
-                  <Text style={styles.brandPillLabel}>SUPER VENDOR</Text>
+                  <Text style={styles.brandPillLabel}>JENKO COFFEE VENDOR</Text>
                 </View>
               </View>
 
@@ -140,7 +140,7 @@ export const LoginScreen = ({ onAuthenticated }: LoginScreenProps) => {
                 />
               </View>
 
-              <Text style={styles.footer}>Copyright 2026 Super Vendor</Text>
+              <Text style={styles.footer}>Copyright 2026 Jenko Coffee Vendor</Text>
             </View>
           </View>
         </ScrollView>
@@ -266,7 +266,6 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     overflow: 'hidden',
     backgroundColor: '#FFFFFF',
-    padding: spacing.xs,
     ...shadowPresets.soft,
   },
   logoHalo: {

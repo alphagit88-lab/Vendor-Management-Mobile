@@ -6,7 +6,7 @@ export const LOGIN_CONTENT_PREVIEW_MODE: LoginContentPreviewMode = 'ready';
 
 export const defaultLoginScreenContent: LoginScreenContent = {
   badgeLabel: 'VM',
-  eyebrow: 'Vendor-Management-Mobile',
+  eyebrow: 'Jenko Coffee Vendor',
   title: 'Sign in to your workspace',
   subtitle:
     'Keep vendors, approvals, and operations aligned from one clean mobile experience.',

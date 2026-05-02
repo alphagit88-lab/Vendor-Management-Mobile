@@ -1,5 +1,5 @@
-//const BASE_URL = 'https://svsoft.io/';
-const BASE_URL = 'http://192.168.8.120:5000/';
+const BASE_URL = 'https://svsoft.io/';
+//const BASE_URL = 'http://192.168.8.120:5000/';
 
 const normalizedBaseUrl = BASE_URL.replace(/\/+$/, '');
 
