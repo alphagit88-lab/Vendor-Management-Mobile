@@ -240,8 +240,12 @@ export const orderService = {
     return getCollection<Category>('categories', token);
   },
 
-  getInventory(token: string) {
-    return getCollection<InventoryItem>('inventory', token);
+  getInventory(token: string, customerId?: number) {
+    let endpoint = 'inventory';
+    if (customerId) {
+      endpoint += `?customer_id=${customerId}`;
+    }
+    return getCollection<InventoryItem>(endpoint, token);
   },
 
   getOrders(token: string, month?: number, year?: number) {

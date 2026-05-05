@@ -777,6 +777,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
   const openPlaceOrders = () => {
     setView('customers');
     setSelectedCustomer(null);
+    setProducts([]); // Clear previous products
     closeCategoryDropdown();
     setSelectedProductCategory(ALL_PRODUCT_CATEGORY);
     setProductSearchQuery('');
@@ -789,12 +790,12 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
     loadCustomers();
   };
 
-  const loadProducts = async () => {
+  const loadProducts = async (customerId?: number) => {
     setProductsStatus('loading');
     setProductsError(null);
     setCheckoutFeedback(null);
 
-    const response = await orderService.getInventory(session.token);
+    const response = await orderService.getInventory(session.token, customerId);
 
     if (!response.ok || !response.data) {
       setProducts([]);
@@ -854,7 +855,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
     if (categoriesStatus === 'idle' || categoriesStatus === 'error') {
       loadCategories();
     }
-    loadProducts();
+    loadProducts(customer.id);
   };
 
   const updateQuantity = (product: PersonalInventoryItem, delta: number) => {
