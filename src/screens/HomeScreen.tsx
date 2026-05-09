@@ -124,9 +124,9 @@ const bytesToBase64 = (bytes: Uint8Array) => {
   return output;
 };
 
-const EARTH_RADIUS_KILOMETERS = 6371.0088;
-const CLOSE_DISTANCE_KILOMETERS = 16;
-const MEDIUM_DISTANCE_KILOMETERS = 40;
+const EARTH_RADIUS_MILES = 3958.8;
+const CLOSE_DISTANCE_MILES = 10;
+const MEDIUM_DISTANCE_MILES = 25;
 const MAX_ORDER_QUANTITY_PER_ITEM = 10;
 
 const formatCurrency = (value: number) =>
@@ -153,11 +153,11 @@ const formatCoordinate = (value: number) =>
     minimumFractionDigits: 4,
     maximumFractionDigits: 4,
   });
-const formatDistanceKilometers = (value: number) =>
+const formatDistanceMiles = (value: number) =>
   `${value.toLocaleString('en-US', {
     minimumFractionDigits: value < 10 ? 1 : 0,
     maximumFractionDigits: value < 10 ? 1 : 0,
-  })} km away`;
+  })} miles away`;
 const formatReceiptTimestamp = (value: string) => {
   const timestamp = new Date(value);
 
@@ -209,7 +209,7 @@ const getLocationErrorMessage = (error: unknown) => {
 
   return 'We could not determine your current location. Showing customers without distance sorting.';
 };
-const getCustomerDistanceKilometers = (
+const getCustomerDistanceMiles = (
   customer: Customer,
   currentLocation: DeviceLocation | null,
 ) => {
@@ -242,12 +242,12 @@ const getCustomerDistanceKilometers = (
       Math.sqrt(1 - haversineComponent),
     );
 
-  return EARTH_RADIUS_KILOMETERS * arcDistance;
+  return EARTH_RADIUS_MILES * arcDistance;
 };
 const getMaxOrderableQuantity = (heldQuantity: number) =>
   Math.min(heldQuantity, MAX_ORDER_QUANTITY_PER_ITEM);
-const getDistanceSignal = (distanceKilometers: number): DistanceSignal => {
-  if (distanceKilometers <= CLOSE_DISTANCE_KILOMETERS) {
+const getDistanceSignal = (distanceMiles: number): DistanceSignal => {
+  if (distanceMiles <= CLOSE_DISTANCE_MILES) {
     return {
       glowColor: 'rgba(67, 193, 96, 0.28)',
       label: 'Close',
@@ -255,7 +255,7 @@ const getDistanceSignal = (distanceKilometers: number): DistanceSignal => {
     };
   }
 
-  if (distanceKilometers <= MEDIUM_DISTANCE_KILOMETERS) {
+  if (distanceMiles <= MEDIUM_DISTANCE_MILES) {
     return {
       glowColor: 'rgba(233, 190, 71, 0.30)',
       label: 'Medium',
@@ -555,7 +555,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
   const sortedCustomers = customers
     .map((customer, index) => ({
       customer,
-      distanceFromDevice: getCustomerDistanceKilometers(
+      distanceFromDevice: getCustomerDistanceMiles(
         customer,
         currentLocation,
       ),
@@ -1834,6 +1834,10 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
       setCreditMemoInput('0');
       setContainerDepositInput('0');
       setIsSummaryVisible(false);
+      setCustomerSignature(null);
+      setDriverSignature(null);
+      setPaymentType('Cash');
+      setCheckNumber('');
     }
 
     const billData = storedBill ? {
@@ -2405,7 +2409,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                         <Text style={styles.customerMetaIcon}>Distance</Text>
                         <Text style={styles.customerMetaValue}>
                           {distanceFromDevice !== null
-                            ? `${formatDistanceKilometers(distanceFromDevice)}${distanceSignal
+                            ? `${formatDistanceMiles(distanceFromDevice)}${distanceSignal
                               ? ` | ${distanceSignal.label}`
                               : ''
                             }`
@@ -2556,7 +2560,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
             actionLabel="Retry"
             message="We could not load personal inventory for this order."
             mode="error"
-            onAction={loadProducts}
+            onAction={() => loadProducts()}
             title="Inventory request failed"
           />
         ) : null}
@@ -2566,7 +2570,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
             actionLabel="Reload"
             message="This user does not currently have any personal stock available."
             mode="empty"
-            onAction={loadProducts}
+            onAction={() => loadProducts()}
             title="No personal inventory"
           />
         ) : null}
@@ -2574,9 +2578,22 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
         {productsStatus === 'ready' ? (
           <>
             <View style={styles.productsSectionHeader}>
-              <Text style={styles.productsSectionTitle}>
-                Available Products
-              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                <Text style={[styles.productsSectionTitle, { marginBottom: 0 }]}>
+                  Available Products
+                </Text>
+                <Pressable
+                  onPress={() => loadProducts()}
+                  style={({ pressed }) => [
+                    styles.refreshButton,
+                    pressed ? { opacity: 0.7 } : null,
+                  ]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                    <Text style={[styles.refreshButtonLabel, { fontSize: 19, lineHeight: 23, marginTop: -2 }]}>↻</Text>
+                    <Text style={[styles.refreshButtonLabel, { lineHeight: 23 }]}>Refresh</Text>
+                  </View>
+                </Pressable>
+              </View>
               <Text style={styles.productCategoryLabel}>Category</Text>
               <Pressable
                 disabled={isCategoryDropdownDisabled}
@@ -4880,6 +4897,17 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     minHeight: 48,
     paddingHorizontal: spacing.lg,
+  },
+  refreshButton: {
+    backgroundColor: palette.primaryStrong,
+    borderRadius: radii.pill,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  refreshButtonLabel: {
+    color: palette.white,
+    fontSize: 13,
+    fontWeight: '800',
   },
   productsSectionTitle: {
     color: ui.textHeading,
