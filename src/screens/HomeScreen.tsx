@@ -1770,6 +1770,14 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
     setCheckoutFeedback(null);
     setLatestStoredBill(null);
 
+    const now = new Date();
+    let h = now.getHours();
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12;
+    h = h ? h : 12;
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const localTimestamp = `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()}, ${h}:${pad(now.getMinutes())}:${pad(now.getSeconds())} ${ampm}`;
+
     const payload: CreateOrderRequest = {
       customerId: selectedCustomer.id,
       items: selectedProducts.map(product => {
@@ -1793,7 +1801,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
       paymentType: paymentType,
       checkNumber: paymentType === 'Check' ? checkNumber : null,
       isChecklist: isChecklistRequest,
-      clientTimestamp: new Date().toISOString()
+      clientTimestamp: localTimestamp
     };
 
     console.log('📦 GENERATING BILL PAYLOAD:', JSON.stringify(payload, null, 2));
@@ -1873,7 +1881,8 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
         session.token,
         orderResponse.data.order.id,
         customerSignature,
-        driverSignature
+        driverSignature,
+        payload.clientTimestamp
       );
       if (checklistResponse.ok && checklistResponse.data) {
         displayPdfUrl = checklistResponse.data.url;
