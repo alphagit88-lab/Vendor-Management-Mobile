@@ -211,6 +211,30 @@ class OrderPdfModule(reactContext: ReactApplicationContext) :
         connection = BluetoothConnection(macAddress)
         connection.open()
         
+        // ── ZQ320 Plus: apply required SGD settings before printing ──────────────
+        // Sending these before obtaining the printer instance ensures the hardware
+        // is fully configured (language, media sensing, label length) before any
+        // image data is transmitted, which fixes label cropping and excess spacing.
+        try {
+            // 1. Force ZPL language so the SDK and printer speak the same dialect.
+            connection.write("! U1 setvar \"device.languages\" \"zpl\"\r\n".toByteArray())
+            // Small delay to let the printer process the language switch.
+            Thread.sleep(200)
+
+            // 2. Gap sensing – stops the printer from continuous‑feeding blank space.
+            connection.write("! U1 setvar \"media.sense_mode\" \"gap\"\r\n".toByteArray())
+
+            // 3. Label length = 400 dots – prevents both cropping and over-feed.
+            connection.write("! U1 setvar \"zpl.label_length\" \"400\"\r\n".toByteArray())
+
+            // 4. Persist the settings so they survive a power cycle.
+            connection.write("~jc^xa^jus^xz".toByteArray())
+            Thread.sleep(300)
+        } catch (e: Exception) {
+            // Non‑fatal: if the printer rejects an SGD command, continue and attempt
+            // to print with whatever settings are already active.
+        }
+
         val zebraPrinter = ZebraPrinterFactory.getInstance(connection)
         
         // 4. Print Image
