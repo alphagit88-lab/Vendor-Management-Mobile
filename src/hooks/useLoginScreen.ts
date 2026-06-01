@@ -80,7 +80,6 @@ export const useLoginScreen = () => {
       const nextValue = !current;
 
       if (!nextValue) {
-        authSessionStorageService.clear();
         rememberedCredentialsService.clear();
       }
 
@@ -115,11 +114,10 @@ export const useLoginScreen = () => {
 
     if (rememberMe) {
       await rememberedCredentialsService.save(formValues);
-      await authSessionStorageService.save(response.data);
     } else {
       await rememberedCredentialsService.clear();
-      await authSessionStorageService.clear();
     }
+    await authSessionStorageService.save(response.data);
 
     return response.data;
   };

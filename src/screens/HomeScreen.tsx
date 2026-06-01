@@ -355,6 +355,9 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
   const [selectedQuantities, setSelectedQuantities] = useState<
     Record<number, number>
   >({});
+  const [shopCurrentStocks, setShopCurrentStocks] = useState<
+    Record<number, string>
+  >({});
   const [creditMemoInput, setCreditMemoInput] = useState('0');
   const [containerDepositInput, setContainerDepositInput] = useState('0');
   const [checkoutState, setCheckoutState] = useState<CheckoutState>('idle');
@@ -666,7 +669,20 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
   const openQuantityModal = (product: PersonalInventoryItem) => {
     setQuantityModalProduct(product);
-    setCustomQuantityInput('1');
+
+    let initialInput = '1';
+    if (selectedCustomer?.par_levels?.[product.id]) {
+      const parVal = parseInt(selectedCustomer.par_levels[product.id] || '0');
+      if (parVal > 0) {
+        const currentStock = parseInt(shopCurrentStocks[product.id] || '0');
+        const recommended = Math.max(0, parVal - currentStock);
+        const currentOrdered = selectedQuantities[product.id] || 0;
+        const unitsToAdd = Math.max(0, recommended - currentOrdered);
+        initialInput = unitsToAdd.toString();
+      }
+    }
+
+    setCustomQuantityInput(initialInput);
     setCustomQuantityError(null);
   };
 
@@ -782,12 +798,25 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
     setSelectedProductCategory(ALL_PRODUCT_CATEGORY);
     setProductSearchQuery('');
     setSelectedQuantities({});
+    setShopCurrentStocks({});
     setIsSummaryVisible(false);
     setIsCustomerDetailsExpanded(false);
     closeQuantityModal();
     resetCheckoutState();
     loadCategories();
     loadCustomers();
+  };
+
+  const handleCancelOrFinishOrder = () => {
+    setLatestStoredBill(null);
+    setCheckoutFeedback(null);
+    setCustomerSignature(null);
+    setDriverSignature(null);
+    setCreditMemoInput('0');
+    setContainerDepositInput('0');
+    setPaymentType('Cash');
+    setCheckNumber('');
+    openPlaceOrders();
   };
 
   const loadProducts = async (customerId?: number) => {
@@ -1647,7 +1676,8 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
   const openStoredReceipt = async () => {
     if (!latestStoredBill) return;
-
+    
+    console.log('url', latestStoredBill.url)
     // Fallback to visual preview
     const base64 = await fetchPdfAsBase64(latestStoredBill.url);
     if (base64) {
@@ -1837,16 +1867,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
     setCheckoutState('idle');
     setReceiptActionState('idle');
 
-    if (!isChecklistRequest) {
-      setSelectedQuantities({});
-      setCreditMemoInput('0');
-      setContainerDepositInput('0');
-      setIsSummaryVisible(false);
-      setCustomerSignature(null);
-      setDriverSignature(null);
-      setPaymentType('Cash');
-      setCheckNumber('');
-    }
+
 
     const billData = storedBill ? {
       ...storedBill,
@@ -2666,40 +2687,111 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                   );
 
                   return (
-                    <Pressable
+                    <View
                       key={product.id}
-                      onPress={() => {
-                        if (remainingQuantity > 0) {
-                          updateQuantity(product, 1);
-                        }
-                      }}
-                      style={({ pressed }) => [
+                      style={[
                         styles.productCard,
                         productCardLayoutStyle,
                         quantity > 0 ? styles.productCardSelected : null,
-                        pressed && remainingQuantity > 0
-                          ? styles.productCardPressed
-                          : null,
                       ]}>
-                      <View style={styles.productCardTopRow}>
-                        <View style={styles.productSkuPill}>
-                          <Text
-                            numberOfLines={1}
-                            style={styles.productSkuPillLabel}>
-                            SKU {product.item_number || 'N/A'}
+                      <Pressable
+                        onPress={() => {
+                          if (remainingQuantity > 0) {
+                            updateQuantity(product, 1);
+                          }
+                        }}
+                        style={({ pressed }) => [
+                          pressed && remainingQuantity > 0
+                            ? styles.productCardPressed
+                            : null,
+                        ]}>
+                        <View style={styles.productCardTopRow}>
+                          <View style={styles.productSkuPill}>
+                            <Text
+                              numberOfLines={1}
+                              style={styles.productSkuPillLabel}>
+                              SKU {product.item_number || 'N/A'}
+                            </Text>
+                          </View>
+                          <Text style={styles.productHeldLabel}>
+                            {remainingQuantity} left for order
                           </Text>
                         </View>
-                        <Text style={styles.productHeldLabel}>
-                          {remainingQuantity} left for order
-                        </Text>
-                      </View>
 
-                      <Text numberOfLines={2} style={styles.productName}>
-                        {normalizeText(product.item_name)}
-                      </Text>
-                      <Text style={styles.productPrice}>
-                        {formatCurrency(product.unitPrice)}
-                      </Text>
+                        <Text numberOfLines={2} style={styles.productName}>
+                          {normalizeText(product.item_name)}
+                        </Text>
+                        <Text style={styles.productPrice}>
+                          {formatCurrency(product.unitPrice)}
+                        </Text>
+                      </Pressable>
+
+                      {/* Current Stock & Suggestion Row */}
+                      {selectedCustomer?.par_levels?.[product.id] && parseInt(selectedCustomer.par_levels[product.id]) > 0 ? (
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginVertical: 8, paddingVertical: 6, borderTopWidth: 1, borderTopColor: ui.cardBorder, borderBottomWidth: 1, borderBottomColor: ui.cardBorder, gap: 4 }}>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: ui.textMuted }}>Customer Stock:</Text>
+                          <TextInput
+                            keyboardType="numeric"
+                            placeholder="0"
+                            placeholderTextColor={ui.textMuted}
+                            style={{
+                              width: 50,
+                              height: 28,
+                              padding: 0,
+                              paddingHorizontal: 4,
+                              backgroundColor: palette.white,
+                              borderWidth: 1,
+                              borderColor: ui.cardBorderStrong,
+                              borderRadius: 6,
+                              fontSize: 12,
+                              fontWeight: 'bold',
+                              textAlign: 'center',
+                              color: ui.textHeading,
+                            }}
+                            value={shopCurrentStocks[product.id] || ''}
+                            onChangeText={(val) => {
+                              const cleanVal = val.replace(/[^0-9]/g, '');
+                              setShopCurrentStocks(prev => ({
+                                ...prev,
+                                [product.id]: cleanVal
+                              }));
+                            }}
+                          />
+                          {(() => {
+                            const parVal = parseInt(selectedCustomer.par_levels[product.id]);
+                            const currentStock = parseInt(shopCurrentStocks[product.id] || '0');
+                            const recommended = Math.max(0, parVal - currentStock);
+                            return (
+                              <Pressable
+                                onPress={() => {
+                                  if (recommended > 0) {
+                                    const finalQty = Math.min(recommended, maxOrderableQuantity);
+                                    setSelectedQuantities(prev => ({
+                                      ...prev,
+                                      [product.id]: finalQty
+                                    }));
+                                  }
+                                }}
+                                style={({ pressed }) => [
+                                  {
+                                    backgroundColor: recommended > 0 ? ui.highlightSoft : ui.softSurfaceStrong,
+                                    paddingHorizontal: 6,
+                                    paddingVertical: 3,
+                                    borderRadius: 6,
+                                    borderWidth: 1,
+                                    borderColor: recommended > 0 ? ui.highlight : ui.cardBorder,
+                                    opacity: pressed ? 0.8 : 1,
+                                  }
+                                ]}
+                              >
+                                <Text style={{ fontSize: 10, fontWeight: '900', color: recommended > 0 ? ui.accentStrong : ui.textMuted }}>
+                                  Top Up: {recommended}
+                                </Text>
+                              </Pressable>
+                            );
+                          })()}
+                        </View>
+                      ) : null}
 
                       <View style={styles.productCardFooter}>
                         {quantity > 0 ? (
@@ -2780,7 +2872,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                           </Pressable>
                         </View>
                       </View>
-                    </Pressable>
+                    </View>
                   );
                 })}
               </View>
@@ -3242,6 +3334,45 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                     )}
                   </Pressable>
                 </View>
+
+                {/* New Order Control Buttons */}
+                <View style={{ borderTopWidth: 1, borderTopColor: ui.cardBorder, marginTop: spacing.md, paddingTop: spacing.md, flexDirection: 'row', gap: spacing.md }}>
+                  <Pressable
+                    onPress={handleCancelOrFinishOrder}
+                    style={({ pressed }) => [
+                      {
+                        flex: 1,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        minHeight: 48,
+                        borderRadius: radii.pill,
+                        borderWidth: 1,
+                        borderColor: '#E15B64',
+                        backgroundColor: pressed ? '#FCEBEC' : 'transparent',
+                      }
+                    ]}>
+                    <Text style={{ color: '#E15B64', fontSize: 14, fontWeight: '900' }}>Cancel Order</Text>
+                  </Pressable>
+
+                  <Pressable
+                    disabled={!latestStoredBill}
+                    onPress={handleCancelOrFinishOrder}
+                    style={({ pressed }) => [
+                      {
+                        flex: 1,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        minHeight: 48,
+                        borderRadius: radii.pill,
+                        backgroundColor: latestStoredBill ? ui.highlight : ui.cardBorderStrong,
+                        opacity: pressed && latestStoredBill ? 0.9 : 1,
+                      }
+                    ]}>
+                    <Text style={{ color: latestStoredBill ? palette.white : ui.textMuted, fontSize: 14, fontWeight: '900' }}>
+                      Finish Order
+                    </Text>
+                  </Pressable>
+                </View>
               </View>
             )}
 
@@ -3347,7 +3478,20 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
               </View>
             </View>
 
-            <Text style={styles.quantityModalInputLabel}>Units to add</Text>
+            <Text style={styles.quantityModalInputLabel}>
+              Units to add
+              {quantityModalProduct && selectedCustomer?.par_levels?.[quantityModalProduct.id] && parseInt(selectedCustomer.par_levels[quantityModalProduct.id]) > 0 && (() => {
+                const parVal = parseInt(selectedCustomer.par_levels[quantityModalProduct.id]);
+                const currentStock = parseInt(shopCurrentStocks[quantityModalProduct.id] || '0');
+                const recommended = Math.max(0, parVal - currentStock);
+                return (
+                  <Text style={{ fontWeight: '900', fontSize: 13, color: '#2E7D32' }}>
+                    {' '}
+                    (Top Up: {recommended})
+                  </Text>
+                );
+              })()}
+            </Text>
             <TextInput
               autoFocus
               keyboardType="number-pad"

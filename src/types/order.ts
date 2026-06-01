@@ -17,6 +17,7 @@ export interface Customer {
   tobacco_permit_number: string;
   tobacco_expire_date: string;
   payment_type: string;
+  par_levels?: Record<number, string>;
 }
 
 export interface InventorySubItem {
