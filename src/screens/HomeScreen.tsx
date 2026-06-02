@@ -366,7 +366,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
     useState(false);
   const [quantityModalProduct, setQuantityModalProduct] =
     useState<PersonalInventoryItem | null>(null);
-  const [customQuantityInput, setCustomQuantityInput] = useState('1');
+  const [customQuantityInput, setCustomQuantityInput] = useState('');
   const [customQuantityError, setCustomQuantityError] = useState<string | null>(
     null,
   );
@@ -431,6 +431,16 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
     authBytes?: Uint8Array;
     authCrc?: number[];
   }>({});
+
+  // Returns States
+  const [selectedReturns, setSelectedReturns] = useState<
+    Record<number, { quantity: number; reason: string }>
+  >({});
+  const [isReturnModalVisible, setIsReturnModalVisible] = useState(false);
+  const [returnModalProduct, setReturnModalProduct] = useState<PersonalInventoryItem | null>(null);
+  const [returnQuantityInput, setReturnQuantityInput] = useState('');
+  const [returnReasonInput, setReturnReasonInput] = useState('');
+  const [isSubmittingReturns, setIsSubmittingReturns] = useState(false);
 
   const handleLXAuth = async (device: any, msg: Uint8Array) => {
     if (msg[0] !== 0x5a) return;
@@ -663,7 +673,7 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
   const closeQuantityModal = () => {
     setQuantityModalProduct(null);
-    setCustomQuantityInput('1');
+    setCustomQuantityInput('');
     setCustomQuantityError(null);
   };
 
@@ -684,6 +694,87 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
 
     setCustomQuantityInput(initialInput);
     setCustomQuantityError(null);
+  };
+
+  // Returns functions
+  const openReturnModal = (product: PersonalInventoryItem) => {
+    setReturnModalProduct(product);
+    const existingReturn = selectedReturns[product.id];
+    setReturnQuantityInput(existingReturn?.quantity.toString() || '');
+    setReturnReasonInput(existingReturn?.reason || '');
+    setIsReturnModalVisible(true);
+  };
+
+  const closeReturnModal = () => {
+    setIsReturnModalVisible(false);
+    setReturnModalProduct(null);
+    setReturnQuantityInput('');
+    setReturnReasonInput('');
+  };
+
+  const addReturn = () => {
+    if (!returnModalProduct) return;
+    if (!selectedCustomer) {
+      Alert.alert('Select customer first', 'Please select a customer before adding returns.');
+      return;
+    }
+
+    const quantity = parseInt(returnQuantityInput, 10);
+    if (!quantity || quantity <= 0) {
+      Alert.alert('Invalid quantity', 'Please enter a valid quantity.');
+      return;
+    }
+
+    const reason = returnReasonInput.trim();
+    if (!reason) {
+      Alert.alert('Reason required', 'Please enter a reason for the return.');
+      return;
+    }
+
+    setSelectedReturns(prev => ({
+      ...prev,
+      [returnModalProduct.id]: { quantity, reason }
+    }));
+
+    closeReturnModal();
+  };
+
+  const removeReturn = (productId: number) => {
+    setSelectedReturns(prev => {
+      const newReturns = { ...prev };
+      delete newReturns[productId];
+      return newReturns;
+    });
+  };
+
+  const handleSubmitReturns = async () => {
+    if (!selectedCustomer) return;
+    const returnsToSubmit = Object.entries(selectedReturns)
+      .filter(([_, r]) => r.quantity > 0)
+      .map(([itemId, r]) => ({
+        item_id: parseInt(itemId, 10),
+        customer_id: selectedCustomer.id,
+        quantity: r.quantity,
+        reason: r.reason
+      }));
+
+    if (returnsToSubmit.length === 0) return;
+
+    setIsSubmittingReturns(true);
+    try {
+      const result = await orderService.createReturns(session.token, returnsToSubmit);
+      if (result.ok) {
+        Alert.alert('Success', 'Returns submitted successfully!');
+        setSelectedReturns({});
+      } else {
+        Alert.alert('Error', result.message || 'Failed to submit returns.');
+      }
+    } catch (err) {
+      console.error(err);
+      Alert.alert('Error', 'Failed to submit returns.');
+    } finally {
+      setIsSubmittingReturns(false);
+    }
   };
 
   const handleCustomQuantityInput = (value: string) => {
@@ -2794,17 +2885,35 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                       ) : null}
 
                       <View style={styles.productCardFooter}>
-                        {quantity > 0 ? (
-                          <View style={styles.productSelectedPill}>
-                            <Text style={styles.productSelectedPillLabel}>
-                              {quantity} in order
+                        <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                          {quantity > 0 ? (
+                            <View style={styles.productSelectedPill}>
+                              <Text style={styles.productSelectedPillLabel}>
+                                {quantity} in order
+                              </Text>
+                            </View>
+                          ) : null}
+                          {selectedReturns[product.id]?.quantity > 0 ? (
+                            <View style={[styles.productSelectedPill, { backgroundColor: ui.darkSurface, flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 5, paddingTop: 6, paddingRight: 12 }]}>
+                              <Text style={[styles.productSelectedPillLabel, { color: ui.softSurface }]}>
+                                Return ({selectedReturns[product.id].quantity})
+                              </Text>
+                              <Pressable
+                                onPress={event => {
+                                  event.stopPropagation();
+                                  removeReturn(product.id);
+                                }}
+                                style={{ padding: 2 }}>
+                                <Text style={{ fontSize: 12, fontWeight: 'bold', color: ui.softSurface }}>✕</Text>
+                              </Pressable>
+                            </View>
+                          ) : null}
+                          {quantity === 0 && !selectedReturns[product.id]?.quantity ? (
+                            <Text style={styles.productHint}>
+                              Max 10 per item
                             </Text>
-                          </View>
-                        ) : (
-                          <Text style={styles.productHint}>
-                            Max 10 per item
-                          </Text>
-                        )}
+                          ) : null}
+                        </View>
 
                         <View style={[styles.productCardActions, { gap: 6 }]}>
                           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
@@ -2870,6 +2979,19 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                             ]}>
                             <Text style={styles.productCustomAddButtonLabel}>ADD</Text>
                           </Pressable>
+
+                          <Pressable
+                            onPress={event => {
+                              event.stopPropagation();
+                              openReturnModal(product);
+                            }}
+                            style={({ pressed }) => [
+                              styles.productCustomAddButton,
+                              { minWidth: 60, paddingHorizontal: 10, backgroundColor: ui.darkSurface },
+                              pressed ? { opacity: 0.8 } : null
+                            ]}>
+                            <Text style={[styles.productCustomAddButtonLabel, { color: ui.softSurface }]}>RETURN</Text>
+                          </Pressable>
                         </View>
                       </View>
                     </View>
@@ -2901,6 +3023,25 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                     stay visible while the summary is hidden.
                   </Text>
                 </View>
+
+                <Pressable
+                  onPress={handleSubmitReturns}
+                  disabled={Object.entries(selectedReturns).filter(([_, r]) => r.quantity > 0).length === 0 || isSubmittingReturns}
+                  style={({ pressed }) => [
+                    styles.summaryToggleButton,
+                    pressed ? styles.summaryToggleButtonPressed : null,
+                    {
+                      opacity: (Object.entries(selectedReturns).filter(([_, r]) => r.quantity > 0).length === 0 || isSubmittingReturns) ? 0.5 : 1
+                    }
+                  ]}>
+                  {isSubmittingReturns ? (
+                    <ActivityIndicator color={ui.softSurface} size="small" />
+                  ) : (
+                    <Text style={styles.summaryToggleButtonLabel}>
+                      Submit Returns ({Object.values(selectedReturns).reduce((acc, r) => acc + r.quantity, 0)})
+                    </Text>
+                  )}
+                </Pressable>
 
                 <Pressable
                   onPress={() => setIsSummaryVisible(current => !current)}
@@ -3536,6 +3677,78 @@ export function HomeScreen({ onSignOut, session }: HomeScreenProps) {
                     : null,
                 ]}>
                 <Text style={styles.quantityModalConfirmButtonLabel}>Add</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        animationType="fade"
+        onRequestClose={closeReturnModal}
+        transparent
+        visible={isReturnModalVisible}>
+        <View style={styles.quantityModalOverlay}>
+          <Pressable
+            onPress={closeReturnModal}
+            style={styles.quantityModalBackdrop}
+          />
+
+          <View style={[styles.quantityModalCard, quantityModalCardStyle]}>
+            <Text style={styles.quantityModalEyebrow}>Return Item</Text>
+            <Text style={styles.quantityModalTitle}>Return quantity</Text>
+            <Text style={styles.quantityModalSubtitle}>
+              {returnModalProduct
+                ? normalizeText(returnModalProduct.item_name)
+                : 'Selected product'}
+            </Text>
+
+            <Text style={styles.quantityModalInputLabel}>
+              Quantity to return
+            </Text>
+            <TextInput
+              autoFocus
+              keyboardType="number-pad"
+              onChangeText={setReturnQuantityInput}
+              placeholder="1"
+              placeholderTextColor={ui.darkTextMuted}
+              style={styles.quantityModalInput}
+              value={returnQuantityInput}
+            />
+
+            <Text style={styles.quantityModalInputLabel}>
+              Reason for return (required)
+            </Text>
+            <TextInput
+              onChangeText={setReturnReasonInput}
+              placeholder="Enter reason"
+              placeholderTextColor={ui.darkTextMuted}
+              style={[styles.quantityModalInput, { height: 80, textAlignVertical: 'top' }]}
+              value={returnReasonInput}
+              multiline
+            />
+
+            <View style={styles.quantityModalActions}>
+              <Pressable
+                onPress={closeReturnModal}
+                style={({ pressed }) => [
+                  styles.quantityModalCancelButton,
+                  pressed ? styles.quantityModalCancelButtonPressed : null,
+                ]}>
+                <Text style={styles.quantityModalCancelButtonLabel}>
+                  Cancel
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={addReturn}
+                style={({ pressed }) => [
+                  styles.quantityModalConfirmButton,
+                  pressed
+                    ? styles.quantityModalConfirmButtonPressed
+                    : null,
+                ]}>
+                <Text style={styles.quantityModalConfirmButtonLabel}>Add Return</Text>
               </Pressable>
             </View>
           </View>
@@ -5840,6 +6053,7 @@ const styles = StyleSheet.create({
     borderRadius: radii.pill,
     justifyContent: 'center',
     minHeight: 44,
+    width: '100%',
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.sm,
   },
